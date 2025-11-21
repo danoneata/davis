@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="author" content="Dan Oneață">
+
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" rel="stylesheet"
+        integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" crossorigin="anonymous">
+    <link rel="icon" type="image/png" href="imgs/logo/logo.png" />
+
+    <title>DAVIS: Data-efficient learning of foundation audio-visual models</title>
+</head>
+
+<body>
+    <div class="container">
+        <div class="card mt-1 mb-4 bg-light">
+            <div class="card-body">
+                <h1 class="card-title">
+                    <img src="imgs/logo/logo-rect.png" alt="DAVIS logo" style="height: 45px" class="align-text-bottom">
+                    DAVIS: Data-efficient learning of foundation audio-visual models</h1>
+                <p class="card-text">
+                    Sight and sound are two of the most important sensory inputs, enabling applications such as video
+                    summarization, multimodal emotion recognition, and documentation of low-resourced languages. The
+                    rise of video media has made it more suitable than ever to train machine learning models on the
+                    audio and visual input modalities. Such models—trained on large amounts of unlabelled data and which
+                    can also be successfully be transferred to multiple tasks—are known as foundation models. However,
+                    the main limitation in training foundation models is the scale of both the data and the
+                    architecture, which has implications for hardware costs, research progress and environment. This
+                    project aims to significantly reduce the cost of training foundation audio-visual models by taking a
+                    data-centric approach. Our approach will involve selecting subsets of the video data that are well
+                    aligned (also known as visually grounded speech) and removing redundancy in each of the two channels
+                    (visual stream and audio stream). Additionally, to facilitate training, we will seek to improve both
+                    training and data efficiency by following the recent best practices developed in the context of more
+                    general image or language models. Our project will enable the next generation of audio-visual models
+                    and their resulting applications to be accessible to both academics and smaller organizations.
+                </p>
+            </div>
+            <ul class="list-group list-group-flush">
+                <li class="list-group-item bg-light">
+                    This project is supported by the Romanian National Authority for Scientific Research and
+                    Innovation,
+                    <a href="https://uefiscdi.gov.ro/">UEFISCDI</a>: <br>
+                    <span class="text-secondary">Project number:</span> PN-IV-P2-2.1-TE-2023-1632 <br>
+                    <span class="text-secondary">Contract number:</span> 138TE / 2025 <br>
+                    <span class="text-secondary">Period:</span> 2025-08-01 – 2027-07-31 <br>
+                    <span class="text-secondary">Research fields:</span> machine learning, statistical data
+                    processing
+                    and
+                    applications using signal processing (e.g., speech, image, video)<br>
+                </li>
+            </ul>
+        </div>
+        <div class="row mx-2">
+            <div class="col">
+                <h2>Objectives</h2>
+                The overarching goal of the project is to build a foundation audio-visual model in an efficient manner.
+                To reach this goal, we set five objectives:
+                <ul>
+                    <li>O1 · Quantify the impact of misaligned data in audio-visual learning.</li>
+                    <li>O2 · Design and implement methods to estimate the alignment of audio-visual data.</li>
+                    <li>O3 · Design and implement filtering methods based on either the audio or visual channels.</li>
+                    <li>O4 · Design, implement and train efficient audio-visual models.</li>
+                    <li>O5 · Evaluate the effect of well-aligned data on downstream tasks.</li>
+                </ul>
+            </div>
+        </div>
+        <div class="row mx-2">
+            <div class="col-md-6">
+                <h2>Deliverables</h2>
+                <ul>
+                    <li>D1.1 · Summary of the state of the art, available datasets, and findings regarding the existing
+                        models.</li>
+                    <li>D2.1 · Description of the filtering techniques.</li>
+                    <li>D2.2 · Filtered dataset.</li>
+                    <li>D3.1 · Description of the model design and its training.</li>
+                    <li>D3.2 · Source code of the implementation (model and training scripts).</li>
+                    <li>D3.3 · Pre-trained models (on the baseline dataset and on the filtered dataset).</li>
+                    <li>D4.1 · Evaluation performance on the downstream tasks.</li>
+                </ul>
+            </div>
+            <div class="col-md-6">
+                <h2>Reports</h2>
+                Below are the activity reports for the three stages of the project (2025, 2026, 2027),
+                describing the seven deliverables;
+                all reports are written in Romanian:
+                <ul>
+                    <li><code>2025/</code> D1.1 (partial) · report <span
+                            class="ms-1 badge bg-success text-white">new</span></li>
+                    <li><code>2026/</code> D1.1 (final), D2.1, D2.2, D3.1</li>
+                    <li><code>2027/</code> D3.2, D3.3, D4.1</li>
+                </ul>
+            </div>
+        </div>
+        <div class="row mx-2">
+            <div class="col">
+                <h2>Publications</h2>
+                <ul>
+                    <li>L. Nortje, D. Oneață, G. Pîrlogeanu, and H. Kamper. <a
+                            href="https://arxiv.org/abs/2409.06013">Improved Visually Prompted Keyword Localisation in
+                            Real Low-Resource Settings</a>. In <span class="fst-italic">13th Conference on Speech
+                            Technology and Human-Computer Dialogue (SpeD)</span>, 2025.</li>
+                </ul>
+            </div>
+        </div>
+        <div class="row mx-2 mb-5 mt-2">
+            <div class="col mx-2">
+                <h2>Team</h2>
+                <div class="row">
+                    <div class="col-1 text-center mx-2 mt-2">
+                        <a href="https://doneata.bitbucket.io" target="_blank">
+                            <img class="mx-auto rounded-circle" src="imgs/team/do.jpg" alt="Dan Oneață"
+                                style="width: 75px; height: 75px">
+                            <div>Dan Oneață</div>
+                        </a>
+                        <div class="text-secondary">Project director & Postdoctoral researcher</div>
+                    </div>
+                    <div class="col-1 text-center mx-2 mt-2">
+                        <a href="https://scholar.google.com/citations?user=g01cVUwAAAAJ&hl=en" target="_blank">
+                            <img class="mx-auto rounded-circle" src="imgs/team/an.png" alt="Ana Neacșu"
+                                style="width: 75px; height: 75px">
+                            <div>Ana Neacșu</div>
+                        </a>
+                        <div class="text-secondary">Postdoctoral researcher</div>
+                    </div>
+                    <div class="col-1 text-center mx-2 mt-2">
+                        <img class="mx-auto rounded-circle" src="imgs/team/person.png" alt="generic person"
+                            style="width: 75px; height: 75px">
+                        <div>Open position</div>
+                        <div class="text-secondary">Postdoctoral researcher</div>
+                    </div>
+                    <div class="col-1 text-center mx-2 mt-2">
+                        <img class="mx-auto rounded-circle" src="imgs/team/person.png" alt="generic person"
+                            style="width: 75px; height: 75px">
+                        <div>Open position</div>
+                        <div class="text-secondary">Postdoctoral researcher</div>
+                    </div>
+                    <div class="col-1 text-center mx-2 mt-2">
+                        <img class="mx-auto rounded-circle" src="imgs/team/person.png" alt="generic person"
+                            style="width: 75px; height: 75px">
+                        <div>Open position</div>
+                        <div class="text-secondary">Doctoral researcher</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/js/bootstrap.bundle.min.js"
+        integrity="sha384-FKyoEForCGlyvwx9Hj09JcYn3nv7wiPVlz7YYwJrWVcXK/BmnVDxM+D2scQbITxI"
+        crossorigin="anonymous"></script>
+</body>
+
+</html>
