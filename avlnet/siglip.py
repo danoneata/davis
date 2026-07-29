@@ -108,13 +108,16 @@ def evaluate(siglip, val_dataloader):
 
 
 def main(
-    train_embeddings = "/root/how2/embeddings/train_grouped_embeddings.pkl",
-    val_embeddings = "/root/how2/embeddings/val_grouped_embeddings.pkl",
-    test_embeddings = "/root/how2/embeddings/dev5_grouped_embeddings.pkl",
+    root,
     batch_size = 2,
     n_epochs = 200,
     experiment_name = "siglip_bs_2_epochs_200"
 ):
+
+    train_embeddings = os.path.join(root, "train_grouped_embeddings.pkl")
+    val_embeddings = os.path.join(root, "val_grouped_embeddings.pkl")
+    test_embeddings = os.path.join(root, "dev5_grouped_embeddings.pkl")
+
     wandb.init(
         project="avlnet",
         name=experiment_name,
