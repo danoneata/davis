@@ -109,14 +109,18 @@ def evaluate(siglip, val_dataloader):
 
 def main(
     root,
+    experiment_name,
     batch_size = 2,
     n_epochs = 200,
-    experiment_name = "siglip_bs_2_epochs_200"
+    checkpoint_dir = "checkpoints",
 ):
 
     train_embeddings = os.path.join(root, "train_grouped_embeddings.pkl")
     val_embeddings = os.path.join(root, "val_grouped_embeddings.pkl")
     test_embeddings = os.path.join(root, "dev5_grouped_embeddings.pkl")
+
+    checkpoint_path = os.path.join(checkpoint_dir, experiment_name, "best.pt")
+    os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
 
     wandb.init(
         project="avlnet",
@@ -181,7 +185,7 @@ def main(
     # scheduler_muon = torch.optim.lr_scheduler.LambdaLR(optim_muon, lr_lambda)
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
-    
+    best_val_r5 = -float("inf")
 
     for epoch in tqdm(range(n_epochs), total=n_epochs, desc="Training"):
         siglip.train()
@@ -211,11 +215,22 @@ def main(
         val_accuracy, val_r5, val_r10 = evaluate(siglip, val_dataloader)
         test_accuracy, test_r5, test_r10 = evaluate(siglip, test_dataloader)
 
+        if val_r5 > best_val_r5:
+            best_val_r5 = val_r5
+            torch.save({
+                "epoch": epoch,
+                "model_state_dict": siglip.state_dict(),
+                "val_r@5": val_r5,
+                "val_r@10": val_r10,
+                "val_accuracy": val_accuracy,
+            }, checkpoint_path)
+
         wandb.log({
             "train_loss": train_loss,
             "val_accuracy": val_accuracy,
             "val_r@5": val_r5,
             "val_r@10": val_r10,
+            "best_val_r@5": best_val_r5,
             "test_accuracy": test_accuracy,
             "test_r@5": test_r5,
             "test_r@10": test_r10
