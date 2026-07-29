@@ -53,27 +53,50 @@ Feature-extraction code lives outside this repo at
 
 ## Training
 
+Every run is identified by a config name. The config lives at
+`configs/<name>.yaml` and holds the full hyperparameter set. That name is also
+used as the wandb run name and the checkpoint subdirectory, so config name and
+run parameters stay in sync — to change anything, edit the YAML (or create a
+new one) rather than passing CLI flags.
+
 ```bash
-uv run siglip.py <root> <experiment_name> [batch_size] [n_epochs]
+uv run siglip.py <config_name>
 ```
 
-- `<root>` — directory holding the three `*_grouped_embeddings.pkl` files
-  (typically `/data/how2/clean_code/how2/embeddings`).
-- `<experiment_name>` — used for the wandb run name and the checkpoint
-  subdirectory.
+Config file schema (`configs/default.yaml`):
 
-Example:
+```yaml
+root: /data/how2/clean_code/how2/embeddings   # dir holding *_grouped_embeddings.pkl
+batch_size: 128
+n_epochs: 100
+projection_dim: 1024   # output dim of both adapters (joint embedding size)
+use_video: true        # true: concat V-JEPA2 (1024) + DINOv2 (768) on the video side
+                       # false: use DINOv2 (768) only
+checkpoint_dir: checkpoints
+```
+
+To create a new experiment: drop a new file under `configs/` (e.g.
+`configs/proj_512_no_video.yaml`) and reference it by its basename.
+
+Examples:
 
 ```bash
-uv run siglip.py /data/how2/clean_code/how2/embeddings run-00 128 100
+# Run with the settings in configs/default.yaml
+uv run siglip.py default
+
+# A dedicated ablation config
+uv run siglip.py proj_512_no_video
 ```
 
 Outputs:
 - Checkpoint of the best-so-far model (by validation R@5) at
-  `checkpoints/<experiment_name>/best.pt`. It stores
-  `{epoch, model_state_dict, val_r@5, val_r@10, val_accuracy}`.
+  `checkpoints/<config_name>/best.pt`. It stores
+  `{epoch, model_state_dict, config, val_r@5, val_r@10, val_accuracy}`, where
+  the embedded `config = {"projection_dim", "use_video"}` is what
+  `show_results.py` reads to rebuild the correct architecture on load.
 - Metrics logged to wandb (`train_loss`, `val_accuracy`, `val_r@5`, `val_r@10`,
-  `best_val_r@5`, and the test-split equivalents).
+  `best_val_r@5`, and the test-split equivalents). The wandb run config
+  captures the hyperparameters loaded from the YAML.
 
 ## Qualitative retrieval viewer
 

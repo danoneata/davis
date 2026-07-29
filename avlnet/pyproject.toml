@@ -8,6 +8,7 @@ dependencies = [
     "decord>=0.6.0",
     "fire>=0.7.1",
     "librosa>=0.11.0",
+    "pyyaml>=6.0",
     "torch>=2.12.0",
     "torchaudio>=2.11.0",
     "torchvision>=0.27.0",

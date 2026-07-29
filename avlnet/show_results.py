@@ -62,8 +62,9 @@ def load_pool(split: str) -> dict:
 @st.cache_resource(show_spinner="Loading model…")
 def load_model(checkpoint_path: str) -> tuple[SigLIP, torch.device]:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = SigLIP().to(device)
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    config = ckpt.get("config", {}) if isinstance(ckpt, dict) else {}
+    model = SigLIP(**config).to(device)
     state_dict = (
         ckpt["model_state_dict"]
         if isinstance(ckpt, dict) and "model_state_dict" in ckpt
@@ -95,7 +96,7 @@ def encode_pool(
     video = torch.from_numpy(pool["video_embeddings"][indices]).to(device)
     image = torch.from_numpy(pool["image_embeddings"][indices]).to(device)
     audio = torch.from_numpy(pool["audio_embeddings"][indices]).to(device)
-    video = torch.cat([video, image], dim=1)
+    video = model.compose_video(video, image)
 
     with torch.no_grad():
         zvideo, zaudio = model(video, audio, normalize=True)

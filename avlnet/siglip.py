@@ -8,6 +8,22 @@ import fire
 import sys
 import wandb
 import math
+import yaml
+from pathlib import Path
+
+
+CONFIGS_DIR = Path(__file__).parent / "configs"
+
+
+def load_config(config_name: str) -> dict:
+    path = CONFIGS_DIR / f"{config_name}.yaml"
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Config `{config_name}` not found at {path}. "
+            f"Available: {sorted(p.stem for p in CONFIGS_DIR.glob('*.yaml'))}"
+        )
+    with open(path) as f:
+        return yaml.safe_load(f) or {}
 
 
 
@@ -41,13 +57,26 @@ class Adapter(torch.nn.Module):
         return self.linear(x) + self.mlp(x)
 
 
+VIDEO_DIM = 1024
+IMAGE_DIM = 768
+AUDIO_DIM = 768
+
+
 class SigLIP(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, projection_dim: int = 1024, use_video: bool = True):
         super().__init__()
-        self.video_adapter = Adapter(1024 + 768, 1024)
-        self.audio_adapter = Adapter(768, 1024)
+        self.projection_dim = projection_dim
+        self.use_video = use_video
+        video_input_dim = (VIDEO_DIM + IMAGE_DIM) if use_video else IMAGE_DIM
+        self.video_adapter = Adapter(video_input_dim, projection_dim)
+        self.audio_adapter = Adapter(AUDIO_DIM, projection_dim)
         self.t_prime = torch.nn.Parameter(torch.tensor(2.3026))
         self.b = torch.nn.Parameter(torch.tensor(-10.0))
+
+    def compose_video(self, video_embeddings, image_embeddings):
+        if self.use_video:
+            return torch.cat([video_embeddings, image_embeddings], dim=1)
+        return image_embeddings
 
     def forward(self, video_embeddings, audio_embeddings, normalize=True):
         video_embeddings = self.video_adapter(video_embeddings)
@@ -83,9 +112,9 @@ def evaluate(siglip, val_dataloader):
         video_embeddings, image_embeddings, audio_embeddings = batch
         video_embeddings = video_embeddings.cuda()
         image_embeddings = image_embeddings.cuda()
-        video_embeddings = torch.cat([video_embeddings, image_embeddings], dim=1)
+        video_embeddings = siglip.compose_video(video_embeddings, image_embeddings)
         audio_embeddings = audio_embeddings.cuda()
-        
+
         video_embeddings, audio_embeddings = siglip(video_embeddings, audio_embeddings, normalize=True)
         labels = torch.eye(video_embeddings.shape[0])
         labels = labels.cuda()
@@ -107,12 +136,14 @@ def evaluate(siglip, val_dataloader):
     return val_accuracy, r_at_5, r_at_10
 
 
-def main(
-    root,
-    experiment_name,
-    batch_size = 2,
-    n_epochs = 200,
-    checkpoint_dir = "checkpoints",
+def run_training(
+    experiment_name: str,
+    root: str,
+    batch_size: int = 2,
+    n_epochs: int = 200,
+    projection_dim: int = 1024,
+    use_video: bool = True,
+    checkpoint_dir: str = "checkpoints",
 ):
 
     train_embeddings = os.path.join(root, "train_grouped_embeddings.pkl")
@@ -130,6 +161,8 @@ def main(
             "val_embeddings": val_embeddings,
             "batch_size": batch_size,
             "n_epochs": n_epochs,
+            "projection_dim": projection_dim,
+            "use_video": use_video,
         }
     )
 
@@ -155,7 +188,7 @@ def main(
         num_workers=0,
     )
 
-    siglip = SigLIP()
+    siglip = SigLIP(projection_dim=projection_dim, use_video=use_video)
     siglip.cuda()
 
     # muon_params = [
@@ -194,7 +227,7 @@ def main(
             video_embeddings, image_embeddings, audio_embeddings = batch
             video_embeddings = video_embeddings.cuda()
             image_embeddings = image_embeddings.cuda()
-            video_embeddings = torch.cat([video_embeddings, image_embeddings], dim=1)
+            video_embeddings = siglip.compose_video(video_embeddings, image_embeddings)
             audio_embeddings = audio_embeddings.cuda()
 
             loss = siglip.loss(video_embeddings, audio_embeddings)
@@ -220,6 +253,7 @@ def main(
             torch.save({
                 "epoch": epoch,
                 "model_state_dict": siglip.state_dict(),
+                "config": {"projection_dim": projection_dim, "use_video": use_video},
                 "val_r@5": val_r5,
                 "val_r@10": val_r10,
                 "val_accuracy": val_accuracy,
@@ -236,6 +270,19 @@ def main(
             "test_r@10": test_r10
         })
 
+
+
+def main(config_name: str):
+    """Run training using `configs/<config_name>.yaml`.
+
+    Example:
+        uv run siglip.py default
+    """
+    cfg = load_config(config_name)
+    print(f"Running config `{config_name}`:")
+    for k, v in sorted(cfg.items()):
+        print(f"  {k}: {v}")
+    run_training(experiment_name=config_name, **cfg)
 
 
 if __name__ == "__main__":
