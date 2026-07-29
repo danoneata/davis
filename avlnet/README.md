@@ -47,9 +47,35 @@ Note: the grouped file drops the segment IDs — order comes from `os.listdir()`
 at grouping time. If you need IDs (e.g. for qualitative inspection), reload the
 per-segment `.pkl`s in `sorted(os.listdir(...))` order.
 
-Feature-extraction code lives outside this repo at
+Feature-extraction code for How2 itself lives outside this repo at
 `/data/how2/clean_code/segments/` (`cache_embeddings.py`, `group_embeddings.py`,
-`split_into_segments*.py`, …).
+`split_into_segments*.py`, …). For other datasets we use `extract_features.py`
+below.
+
+## Feature extraction (other datasets)
+
+`extract_features.py` runs V-JEPA2 + DINOv2 + WavLM on every video of a
+registered dataset and writes one `.pkl` per clip (same schema as the per-segment
+files above). Audio is extracted on the fly with `ffmpeg` (mono, 16 kHz) into a
+sibling `audios/` cache, so re-runs skip both ffmpeg and any already-processed
+clips.
+
+```bash
+uv run extract_features.py <dataset_name>
+```
+
+Registered datasets (edit the `DATASETS` dict at the top of the file to add more):
+
+| Dataset   | Videos path                          | Output embeddings                          |
+| --------- | ------------------------------------ | ------------------------------------------ |
+| msr-vtt   | `/data/how2/msr-vtt/TestVideo/`      | `/data/how2/msr-vtt/embeddings/`           |
+| youcook2  | `/data/how2/youcook2/val/`           | `/data/how2/youcook2/embeddings/`          |
+
+Video-file extensions handled: `.mp4`, `.mkv`, `.webm`, `.avi`, `.mov`. The
+output filename is `<video_stem>.pkl`. Requires **both `ffmpeg` and `sox`** on
+`PATH` — audio is extracted as `ffmpeg -vn` → `sox gain -4 channels 1 rate
+16000`, matching the upstream How2 preprocessing so the trained model sees
+consistent audio at eval time.
 
 ## Training
 
