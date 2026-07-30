@@ -32,14 +32,18 @@ DATASETS = {
     "msr-vtt": {
         "videos_path": Path("/data/how2/msr-vtt/TestVideo"),
         "selected_files": Path("/data/how2/avlnet-data/msrvtt_val_ids.txt"),
+        # Antonio's embeddings path
+        # "embeddings_path": Path("/data/how2/evaluation_data/msr-vtt/embeddings"),
         "embeddings_path": DATA_DIR / "embeddings" / "msr-vtt",
-        "audios_path": DATA_DIR / "audios" / "msr-vtt",
+        # "audios_path": DATA_DIR / "audios" / "msr-vtt",
     },
     "youcook2": {
         "videos_path": Path("/data/how2/youcook2/val"),
         "selected_files": Path("/data/how2/avlnet-data/youcook_val_ids_common.txt"),
-        "embeddings_path": DATA_DIR / "embeddings" / "youcook2",
-        "audios_path": DATA_DIR / "audios" / "youcook2",
+        # Antonio's embeddings path
+        "embeddings_path": Path("/data/how2/evaluation_data/youcook2/embeddings"),
+        # "embeddings_path": DATA_DIR / "embeddings" / "youcook2",
+        # "audios_path": DATA_DIR / "audios" / "youcook2",
     },
 }
 

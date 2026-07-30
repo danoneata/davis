@@ -51,6 +51,7 @@ def _load_external_dataset(name: str):
             f"Embeddings directory does not exist: {emb_dir}. "
             f"Run: uv run extract_features.py {name}"
         )
+
     paths = sorted(emb_dir.glob("*.pkl"))
     if not paths:
         raise FileNotFoundError(f"No .pkl files in {emb_dir}")
@@ -59,9 +60,12 @@ def _load_external_dataset(name: str):
     for path in tqdm(paths, desc=f"Loading {name}"):
         with open(path, "rb") as f:
             d = pickle.load(f)
+        if d["image_embedding"].ndim == 2:
+            d["image_embedding"] = d["image_embedding"].mean(axis=0)
         video.append(d["video_embedding"])
         image.append(d["image_embedding"])
         audio.append(d["audio_embedding"])
+
     return (
         np.stack(video).astype(np.float32),
         np.stack(image).astype(np.float32),
