@@ -8,37 +8,77 @@ import streamlit as st
 import torch
 from tqdm import tqdm
 
+from evaluate import HOW2_SPLITS
+from extract_features import DATASETS, list_videos
 from siglip import SigLIP
 
 SEGMENTS_ROOT = Path("/data/how2/clean_code/how2/segments")
 EMBEDDINGS_ROOT = Path("/data/how2/clean_code/how2/embeddings")
 CACHE_ROOT = Path(__file__).parent / "cache"
 DEFAULT_CHECKPOINT = Path(__file__).parent / "checkpoints" / "run-00" / "best.pt"
-SPLITS = ["val", "dev5", "train"]
+# How2 splits plus the external evaluation datasets registered in extract_features.
+DATASETS_ALL = ["how2-val", "how2-dev5", "how2-train", *sorted(DATASETS)]
 MAX_TOPK = 20
 BATCH_SIZE = 256
 
 
-def build_pool_cache(split: str) -> Path:
-    """Load all per-segment .pkl files for `split` in sorted order and cache to disk."""
+def embeddings_dir(dataset: str) -> Path:
+    """Directory of per-segment embedding .pkl files, as written by feature extraction."""
+    if dataset in HOW2_SPLITS:
+        return EMBEDDINGS_ROOT / HOW2_SPLITS[dataset]
+    if dataset in DATASETS:
+        return DATASETS[dataset]["embeddings_path"]
+    raise ValueError(f"Unknown dataset `{dataset}`. Available: {DATASETS_ALL}")
+
+
+def videos_dir(dataset: str) -> Path:
+    if dataset in HOW2_SPLITS:
+        return SEGMENTS_ROOT / HOW2_SPLITS[dataset]
+    return DATASETS[dataset]["videos_path"]
+
+
+def cache_tag(dataset: str) -> str:
+    """Filename component for on-disk caches.
+
+    For How2 this is the bare split name, so caches written before multi-dataset
+    support stay valid. External datasets get a hash of their embeddings dir, since
+    `DATASETS` can be pointed at different feature sets for the same dataset.
+    """
+    if dataset in HOW2_SPLITS:
+        return HOW2_SPLITS[dataset]
+    digest = hashlib.md5(str(embeddings_dir(dataset)).encode()).hexdigest()[:6]
+    return f"{dataset}-{digest}"
+
+
+def build_pool_cache(dataset: str) -> Path:
+    """Load all per-segment .pkl files for `dataset` in sorted order and cache to disk."""
     CACHE_ROOT.mkdir(parents=True, exist_ok=True)
-    cache_path = CACHE_ROOT / f"pool_{split}.pkl"
+    cache_path = CACHE_ROOT / f"pool_{cache_tag(dataset)}.pkl"
     if cache_path.exists():
         return cache_path
 
-    emb_dir = EMBEDDINGS_ROOT / split
+    emb_dir = embeddings_dir(dataset)
+    if not emb_dir.exists():
+        raise FileNotFoundError(
+            f"Embeddings directory does not exist: {emb_dir}. "
+            f"Run: uv run extract_features.py {dataset}"
+        )
     files = sorted(f for f in os.listdir(emb_dir) if f.endswith(".pkl"))
 
     ids, video, image, audio = [], [], [], []
-    for name in tqdm(files, desc=f"Loading {split} embeddings"):
+    for name in tqdm(files, desc=f"Loading {dataset} embeddings"):
         try:
             with open(emb_dir / name, "rb") as f:
                 d = pickle.load(f)
         except Exception:
             continue
+        image_embedding = d["image_embedding"]
+        if image_embedding.ndim == 2:
+            # Some datasets store per-frame image features; pool as in evaluate.py.
+            image_embedding = image_embedding.mean(axis=0)
         ids.append(name[:-4])
         video.append(d["video_embedding"])
-        image.append(d["image_embedding"])
+        image.append(image_embedding)
         audio.append(d["audio_embedding"])
 
     payload = {
@@ -53,8 +93,8 @@ def build_pool_cache(split: str) -> Path:
 
 
 @st.cache_resource(show_spinner="Loading pool embeddings…")
-def load_pool(split: str) -> dict:
-    cache_path = build_pool_cache(split)
+def load_pool(dataset: str) -> dict:
+    cache_path = build_pool_cache(dataset)
     with open(cache_path, "rb") as f:
         return pickle.load(f)
 
@@ -77,13 +117,13 @@ def load_model(checkpoint_path: str) -> tuple[SigLIP, torch.device]:
 
 @st.cache_resource(show_spinner="Encoding pool…")
 def encode_pool(
-    split: str,
+    dataset: str,
     checkpoint_path: str,
     pool_size: int,
     seed: int,
 ) -> dict:
     """Return {'ids', 'zvideo', 'zaudio'} for the selected pool subset."""
-    pool = load_pool(split)
+    pool = load_pool(dataset)
     model, device = load_model(checkpoint_path)
 
     n = len(pool["ids"])
@@ -105,23 +145,36 @@ def encode_pool(
     return {"ids": ids, "zvideo": zvideo.cpu(), "zaudio": zaudio.cpu()}
 
 
-def video_path(split: str, segment_id: str) -> Path:
-    return SEGMENTS_ROOT / split / f"{segment_id}.mp4"
+@st.cache_resource(show_spinner=False)
+def video_index(dataset: str) -> dict:
+    """Map segment id → video file for datasets whose extensions vary."""
+    path = videos_dir(dataset)
+    if not path.exists():
+        return {}
+    return {p.stem: p for p in list_videos(path)}
+
+
+def video_path(dataset: str, segment_id: str) -> Path:
+    # How2 segment dirs are large, so build the path directly instead of listing them.
+    if dataset in HOW2_SPLITS:
+        return videos_dir(dataset) / f"{segment_id}.mp4"
+    default = videos_dir(dataset) / f"{segment_id}.mp4"
+    return video_index(dataset).get(segment_id, default)
 
 
 def _predictions_cache_key(
-    split: str, checkpoint_path: str, pool_size: int, seed: int, direction: str
+    dataset: str, checkpoint_path: str, pool_size: int, seed: int, direction: str
 ) -> str:
     ckpt_mtime = (
         os.path.getmtime(checkpoint_path) if os.path.exists(checkpoint_path) else 0
     )
-    raw = f"{split}|{checkpoint_path}|{ckpt_mtime}|{pool_size}|{seed}|{direction}|k{MAX_TOPK}"
+    raw = f"{cache_tag(dataset)}|{checkpoint_path}|{ckpt_mtime}|{pool_size}|{seed}|{direction}|k{MAX_TOPK}"
     return hashlib.md5(raw.encode()).hexdigest()[:12]
 
 
 @st.cache_resource(show_spinner="Precomputing retrievals…")
 def precompute_predictions(
-    split: str,
+    dataset: str,
     checkpoint_path: str,
     pool_size: int,
     seed: int,
@@ -130,15 +183,15 @@ def precompute_predictions(
     """Compute top-MAX_TOPK results and ground-truth rank for every query.
 
     Returns {'topk_idx': (N, MAX_TOPK), 'topk_score': (N, MAX_TOPK), 'gt_rank': (N,)}.
-    Persisted to disk under cache/preds_<split>_<hash>.pkl.
+    Persisted to disk under cache/preds_<dataset>_<hash>.pkl.
     """
-    key = _predictions_cache_key(split, checkpoint_path, pool_size, seed, direction)
-    disk_path = CACHE_ROOT / f"preds_{split}_{key}.pkl"
+    key = _predictions_cache_key(dataset, checkpoint_path, pool_size, seed, direction)
+    disk_path = CACHE_ROOT / f"preds_{cache_tag(dataset)}_{key}.pkl"
     if disk_path.exists():
         with open(disk_path, "rb") as f:
             return pickle.load(f)
 
-    encoded = encode_pool(split, checkpoint_path, pool_size, seed)
+    encoded = encode_pool(dataset, checkpoint_path, pool_size, seed)
     if direction == "audio→video":
         query_mat, gallery = encoded["zaudio"], encoded["zvideo"]
     else:
@@ -186,7 +239,7 @@ def retrieve(preds: dict, query_idx: int, k: int) -> list:
 
 def render_card(
     container,
-    split: str,
+    dataset: str,
     segment_id: str,
     rank: int,
     score: float,
@@ -196,21 +249,24 @@ def render_card(
     if is_gt:
         label = "✅ " + label
     container.markdown(label)
-    path = video_path(split, segment_id)
+    path = video_path(dataset, segment_id)
     if path.exists():
         container.video(str(path))
     else:
         container.warning(f"Missing video file: {path}")
 
 
-def render_query_card(container, split: str, segment_id: str, badge: str):
+def render_query_card(container, dataset: str, segment_id: str, badge: str):
     container.markdown(f"`{segment_id}` · {badge}")
-    path = video_path(split, segment_id)
-    container.video(str(path))
+    path = video_path(dataset, segment_id)
+    if path.exists():
+        container.video(str(path))
+    else:
+        container.warning(f"Missing video file: {path}")
 
 
 def render_query_row(
-    split: str,
+    dataset: str,
     query_id: str,
     query_idx: int,
     ids: list,
@@ -228,7 +284,7 @@ def render_query_row(
 
     col, *_ = st.columns(n_cols)
     col.markdown(f"### Query")
-    render_query_card(col, split, query_id, badge)
+    render_query_card(col, dataset, query_id, badge)
 
     results = [
         (ids[pool_idx], rank, score, pool_idx == query_idx)
@@ -241,7 +297,7 @@ def render_query_row(
         cols = st.columns(n_cols)
         for col, cell in zip(cols, results[row_start : row_start + n_cols]):
             sid, rank, score, is_gt = cell
-            render_card(col, split, sid, rank, score, is_gt)
+            render_card(col, dataset, sid, rank, score, is_gt)
 
 
 def select_query_indices(
@@ -272,7 +328,6 @@ def get_models():
     return os.listdir("checkpoints")
 
 
-
 def main():
     st.set_page_config(page_title="SigLIP retrieval viewer", layout="wide")
     st.title("SigLIP qualitative retrieval")
@@ -281,12 +336,16 @@ def main():
         st.header("Configuration")
         model_name = st.selectbox("Model", get_models(), index=0)
 
-        split = st.selectbox("Split", SPLITS, index=0)
+        dataset = st.selectbox("Dataset", DATASETS_ALL, index=0)
         direction = st.radio("Direction", ["audio→video", "video→audio"], index=0)
 
-        pool = load_pool(split)
+        try:
+            pool = load_pool(dataset)
+        except FileNotFoundError as e:
+            st.error(str(e))
+            st.stop()
         n_total = len(pool["ids"])
-        st.caption(f"Split `{split}` has **{n_total}** segments.")
+        st.caption(f"Dataset `{dataset}` has **{n_total}** segments.")
 
         preset = st.selectbox(
             "Pool size",
@@ -321,16 +380,16 @@ def main():
 
     seed = 42
     checkpoint_path = f"checkpoints/{model_name}/best.pt"
-    encoded = encode_pool(split, checkpoint_path, int(pool_size), int(seed))
+    encoded = encode_pool(dataset, checkpoint_path, int(pool_size), int(seed))
     preds = precompute_predictions(
-        split, checkpoint_path, int(pool_size), int(seed), direction
+        dataset, checkpoint_path, int(pool_size), int(seed), direction
     )
     ids = encoded["ids"]
     gt_rank_all = preds["gt_rank"]
     n_errors = int((gt_rank_all > top_k).sum())
     acc = 1.0 - n_errors / len(ids)
     st.caption(
-        f"Retrieval pool: **{len(ids)}** segments (split `{split}`, direction `{direction}`). "
+        f"Retrieval pool: **{len(ids)}** segments (dataset `{dataset}`, direction `{direction}`). "
         f"R@{top_k}: **{acc:.1%}** — {n_errors} errors (GT outside top-{top_k})."
     )
 
@@ -364,7 +423,13 @@ def main():
         query_id = ids[query_idx]
         results = retrieve(preds, query_idx, k=top_k)
         render_query_row(
-            split, query_id, query_idx, ids, int(gt_rank_all[query_idx]), results, top_k
+            dataset,
+            query_id,
+            query_idx,
+            ids,
+            int(gt_rank_all[query_idx]),
+            results,
+            top_k,
         )
         if i < len(selected) - 1:
             st.divider()
