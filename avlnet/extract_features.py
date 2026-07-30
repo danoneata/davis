@@ -23,7 +23,9 @@ from transformers import (
 
 from utils import read_file
 
-warnings.filterwarnings("ignore", message="Support for mismatched key_padding_mask and attn_mask")
+warnings.filterwarnings(
+    "ignore", message="Support for mismatched key_padding_mask and attn_mask"
+)
 
 
 DATA_DIR = Path(__file__).parent / "data"
