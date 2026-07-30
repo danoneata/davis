@@ -2,6 +2,8 @@ import os
 import pickle
 import subprocess
 import tempfile
+import warnings
+
 from pathlib import Path
 
 import fire
@@ -19,15 +21,25 @@ from transformers import (
     WavLMModel,
 )
 
+from utils import read_file
+
+warnings.filterwarnings("ignore", message="Support for mismatched key_padding_mask and attn_mask")
+
+
+DATA_DIR = Path(__file__).parent / "data"
 
 DATASETS = {
     "msr-vtt": {
         "videos_path": Path("/data/how2/msr-vtt/TestVideo"),
-        "embeddings_path": Path("/data/how2/msr-vtt/embeddings"),
+        "selected_files": Path("/data/how2/avlnet-data/msrvtt_val_ids.txt"),
+        "embeddings_path": DATA_DIR / "embeddings" / "msr-vtt",
+        "audios_path": DATA_DIR / "audios" / "msr-vtt",
     },
     "youcook2": {
         "videos_path": Path("/data/how2/youcook2/val"),
-        "embeddings_path": Path("/data/how2/youcook2/embeddings"),
+        "selected_files": Path("/data/how2/avlnet-data/youcook_val_ids_common.txt"),
+        "embeddings_path": DATA_DIR / "embeddings" / "youcook2",
+        "audios_path": DATA_DIR / "audios" / "youcook2",
     },
 }
 
@@ -160,9 +172,9 @@ def list_videos(videos_path: Path) -> list:
 def main(dataset_name: str):
     """Extract V-JEPA2 + DINOv2 + WavLM features for every video in a registered dataset.
 
-    Writes one <segment_id>.pkl per video to `<embeddings_path>/`, skipping any that
-    already exist. Audio is extracted on the fly to `<embeddings_path>/../audios/`
-    (also cached, so re-runs skip ffmpeg).
+    Paths per dataset come from `DATASETS`. Writes one <segment_id>.pkl per video to
+    `embeddings_path`, skipping any that already exist. Audio is extracted on the fly
+    to `audios_path` (also cached, so re-runs skip ffmpeg).
 
     Example:
         uv run extract_features.py msr-vtt
@@ -175,7 +187,7 @@ def main(dataset_name: str):
     cfg = DATASETS[dataset_name]
     videos_path = cfg["videos_path"]
     embeddings_path = cfg["embeddings_path"]
-    audios_path = embeddings_path.parent / "audios"
+    audios_path = cfg["audios_path"]
 
     if not videos_path.exists():
         raise FileNotFoundError(f"Videos path does not exist: {videos_path}")
@@ -191,11 +203,16 @@ def main(dataset_name: str):
     image_model, image_processor = models["image"]
     audio_model, audio_processor = models["audio"]
 
+    selected_files = read_file(cfg["selected_files"])
+
     n_done = n_skipped = n_failed = 0
     for video_file in tqdm(videos, desc=f"Extracting {dataset_name}"):
         segment_id = video_file.stem
         emb_path = embeddings_path / f"{segment_id}.pkl"
         wav_path = audios_path / f"{segment_id}.wav"
+
+        if segment_id not in selected_files:
+            continue
 
         if emb_path.exists():
             n_skipped += 1

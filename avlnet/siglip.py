@@ -102,12 +102,16 @@ class SigLIP(torch.nn.Module):
         return loss
         
 
+@torch.no_grad()
 def evaluate(siglip, val_dataloader):
+    """Video->audio retrieval metrics, computed within each batch.
+
+    Returns a dict with R@1/5/10 (fractions in [0, 1]), MRR (mean reciprocal
+    rank) and MedR (median rank). All are derived from the rank of the matching
+    audio for each video: rank 1 means retrieved first.
+    """
     siglip.eval()
-    val_accuracy = 0
-    r_at_5 = 0
-    r_at_10 = 0
-    n_samples = 0
+    ranks = []
     for batch in val_dataloader:
         video_embeddings, image_embeddings, audio_embeddings = batch
         video_embeddings = video_embeddings.cuda()
@@ -116,24 +120,21 @@ def evaluate(siglip, val_dataloader):
         audio_embeddings = audio_embeddings.cuda()
 
         video_embeddings, audio_embeddings = siglip(video_embeddings, audio_embeddings, normalize=True)
-        labels = torch.eye(video_embeddings.shape[0])
-        labels = labels.cuda()
         logits = torch.matmul(video_embeddings, audio_embeddings.T)
-        acc = torch.sum(torch.argmax(logits, dim=1) == torch.argmax(labels, dim=1))# / video_embeddings.shape[0]
-        val_accuracy += acc.item()
-        
-        # compute r@5 and r@10
-        targets = torch.argmax(labels, dim=1).unsqueeze(1)
-        _, top10_indices = torch.topk(logits, k=min(10, logits.shape[1]), dim=1)
-        correct_topk = (top10_indices == targets)
-        r_at_5 += correct_topk[:, :5].sum().item()
-        r_at_10 += correct_topk.sum().item()
-        
-        n_samples += video_embeddings.shape[0]
-    val_accuracy /= n_samples
-    r_at_5 /= n_samples
-    r_at_10 /= n_samples
-    return val_accuracy, r_at_5, r_at_10
+
+        # The correct audio for video i sits on the diagonal, so its rank is the
+        # number of distractors scoring strictly higher, plus one.
+        target_scores = logits.diagonal().unsqueeze(1)
+        ranks.append((logits > target_scores).sum(dim=1) + 1)
+
+    ranks = torch.cat(ranks).float()
+    return {
+        "r1": (ranks <= 1).float().mean().item(),
+        "r5": (ranks <= 5).float().mean().item(),
+        "r10": (ranks <= 10).float().mean().item(),
+        "mrr": (1.0 / ranks).mean().item(),
+        "medr": ranks.median().item(),
+    }
 
 
 def run_training(
@@ -245,29 +246,34 @@ def run_training(
             optimizer.zero_grad()
         train_loss /= len(dataloader)
 
-        val_accuracy, val_r5, val_r10 = evaluate(siglip, val_dataloader)
-        test_accuracy, test_r5, test_r10 = evaluate(siglip, test_dataloader)
+        val_metrics = evaluate(siglip, val_dataloader)
+        test_metrics = evaluate(siglip, test_dataloader)
 
-        if val_r5 > best_val_r5:
-            best_val_r5 = val_r5
+        if val_metrics["r5"] > best_val_r5:
+            best_val_r5 = val_metrics["r5"]
             torch.save({
                 "epoch": epoch,
                 "model_state_dict": siglip.state_dict(),
                 "config": {"projection_dim": projection_dim, "use_video": use_video},
-                "val_r@5": val_r5,
-                "val_r@10": val_r10,
-                "val_accuracy": val_accuracy,
+                "val_r@5": val_metrics["r5"],
+                "val_r@10": val_metrics["r10"],
+                "val_accuracy": val_metrics["r1"],
+                "val_mrr": val_metrics["mrr"],
             }, checkpoint_path)
 
         wandb.log({
             "train_loss": train_loss,
-            "val_accuracy": val_accuracy,
-            "val_r@5": val_r5,
-            "val_r@10": val_r10,
+            "val_accuracy": val_metrics["r1"],
+            "val_r@5": val_metrics["r5"],
+            "val_r@10": val_metrics["r10"],
+            "val_mrr": val_metrics["mrr"],
+            "val_medr": val_metrics["medr"],
             "best_val_r@5": best_val_r5,
-            "test_accuracy": test_accuracy,
-            "test_r@5": test_r5,
-            "test_r@10": test_r10
+            "test_accuracy": test_metrics["r1"],
+            "test_r@5": test_metrics["r5"],
+            "test_r@10": test_metrics["r10"],
+            "test_mrr": test_metrics["mrr"],
+            "test_medr": test_metrics["medr"],
         })
 
 

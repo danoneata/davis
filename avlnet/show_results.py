@@ -268,12 +268,19 @@ def select_query_indices(
     return arr[:n].tolist()
 
 
+def get_models():
+    return os.listdir("checkpoints")
+
+
+
 def main():
     st.set_page_config(page_title="SigLIP retrieval viewer", layout="wide")
     st.title("SigLIP qualitative retrieval")
 
     with st.sidebar:
         st.header("Configuration")
+        model_name = st.selectbox("Model", get_models(), index=0)
+
         split = st.selectbox("Split", SPLITS, index=0)
         direction = st.radio("Direction", ["audio→video", "video→audio"], index=0)
 
@@ -313,7 +320,7 @@ def main():
         only_errors = st.checkbox("Only show errors (GT not in top-K)", value=False)
 
     seed = 42
-    checkpoint_path = "checkpoints/run-00/best.pt"
+    checkpoint_path = f"checkpoints/{model_name}/best.pt"
     encoded = encode_pool(split, checkpoint_path, int(pool_size), int(seed))
     preds = precompute_predictions(
         split, checkpoint_path, int(pool_size), int(seed), direction

@@ -19,7 +19,7 @@ VIDEO_DIRS = {
 }
 
 SELECTED_FILES = {
-    "msr-vtt": ["video{}.mp4".format(i) for i in [8790, 8819, 8836, 8867, 8903, 8915]],
+    "msr-vtt": ["video{}.mp4".format(i) for i in [7029, 8790, 8819, 8836, 8867, 8903, 8915]],
     "youcook2": ["hs2h7nb5PHQ_3.mp4", "hs2h7nb5PHQ_4.mp4"],
 }
 
@@ -28,8 +28,8 @@ def show_videos(dataset: str) -> None:
     video_dir = VIDEO_DIRS[dataset]
     num_to_show = 6 * NUM_COLS
     files = list(video_dir.glob("*.mp4"))[10 :num_to_show + 10]
-    # files = SELECTED_FILES[dataset]
-    # files = [video_dir / file for file in files]
+    files = SELECTED_FILES[dataset]
+    files = [video_dir / file for file in files]
     for row_files in partition_all(NUM_COLS, files):
         cols = st.columns(NUM_COLS)
         for col, video_file in zip(cols, row_files):
