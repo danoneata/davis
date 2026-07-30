@@ -103,15 +103,15 @@ def get_wavlm_embedding(audio_path, model, processor):
     assert waveform.ndim == 1, f"Audio must be mono, got shape {waveform.shape}"
     assert sr == 16000, f"Audio must be 16 kHz, got {sr}"
 
-    inputs = processor(
-        waveform, sampling_rate=sr, return_tensors="pt", padding=False
-    )
+    inputs = processor(waveform, sampling_rate=sr, return_tensors="pt", padding=False)
     input_values = inputs.input_values.to("cuda")
     attention_mask = inputs.get("attention_mask")
     if attention_mask is not None:
         attention_mask = attention_mask.to("cuda")
 
-    outputs = model(input_values, attention_mask=attention_mask, output_hidden_states=True)
+    outputs = model(
+        input_values, attention_mask=attention_mask, output_hidden_states=True
+    )
     last_hidden = outputs.last_hidden_state[0].cpu().numpy()
     return last_hidden.mean(axis=0)
 
@@ -128,8 +128,12 @@ def extract_audio(video_path: Path, wav_path: Path) -> None:
         raw_wav = Path(td) / "raw.wav"
         subprocess.run(
             [
-                "ffmpeg", "-loglevel", "quiet", "-y",
-                "-i", str(video_path),
+                "ffmpeg",
+                "-loglevel",
+                "quiet",
+                "-y",
+                "-i",
+                str(video_path),
                 "-vn",
                 str(raw_wav),
             ],
@@ -137,10 +141,15 @@ def extract_audio(video_path: Path, wav_path: Path) -> None:
         )
         subprocess.run(
             [
-                "sox", str(raw_wav), str(wav_path),
-                "gain", "-4",
-                "channels", "1",
-                "rate", "16000",
+                "sox",
+                str(raw_wav),
+                str(wav_path),
+                "gain",
+                "-4",
+                "channels",
+                "1",
+                "rate",
+                "16000",
             ],
             check=True,
         )
@@ -170,7 +179,8 @@ def load_models():
 
 def list_videos(videos_path: Path) -> list:
     return sorted(
-        p for p in videos_path.iterdir()
+        p
+        for p in videos_path.iterdir()
         if p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS
     )
 
@@ -226,11 +236,22 @@ def main(dataset_name: str):
 
         try:
             extract_audio(video_file, wav_path)
-            video_embedding = get_vjepa2_embedding(video_file, video_model, video_processor)
-            image_embedding = get_dinov2_embeddings_1fps(
-                video_file, image_model, image_processor, pool="cls"
+            video_embedding = get_vjepa2_embedding(
+                video_file,
+                video_model,
+                video_processor,
             )
-            audio_embedding = get_wavlm_embedding(wav_path, audio_model, audio_processor)
+            image_embedding = get_dinov2_embeddings_1fps(
+                video_file,
+                image_model,
+                image_processor,
+                pool="cls",
+            )
+            audio_embedding = get_wavlm_embedding(
+                wav_path,
+                audio_model,
+                audio_processor,
+            )
         except Exception as e:
             print(f"[error] {segment_id}: {e}")
             n_failed += 1
@@ -247,9 +268,7 @@ def main(dataset_name: str):
             )
         n_done += 1
 
-    print(
-        f"Done: {n_done} new, {n_skipped} already-existing, {n_failed} failed."
-    )
+    print(f"Done: {n_done} new, {n_skipped} already-existing, {n_failed} failed.")
 
 
 if __name__ == "__main__":
