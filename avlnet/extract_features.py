@@ -37,7 +37,7 @@ DATASETS = {
         # Antonio's embeddings path
         # "embeddings_path": Path("/data/how2/evaluation_data/msr-vtt/embeddings"),
         "embeddings_path": DATA_DIR / "embeddings" / "msr-vtt",
-        # "audios_path": DATA_DIR / "audios" / "msr-vtt",
+        "audios_path": DATA_DIR / "audios" / "msr-vtt",
     },
     "youcook2": {
         "videos_path": Path("/data/how2/youcook2/val"),
@@ -45,7 +45,7 @@ DATASETS = {
         # Antonio's embeddings path
         "embeddings_path": Path("/data/how2/evaluation_data/youcook2/embeddings"),
         # "embeddings_path": DATA_DIR / "embeddings" / "youcook2",
-        # "audios_path": DATA_DIR / "audios" / "youcook2",
+        "audios_path": DATA_DIR / "audios" / "youcook2",
     },
 }
 
