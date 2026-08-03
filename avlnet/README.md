@@ -66,16 +66,42 @@ uv run extract_features.py <dataset_name>
 
 Registered datasets (edit the `DATASETS` dict at the top of the file to add more):
 
-| Dataset   | Videos path                          | Output embeddings                          |
-| --------- | ------------------------------------ | ------------------------------------------ |
-| msr-vtt   | `/data/how2/msr-vtt/TestVideo/`      | `/data/how2/msr-vtt/embeddings/`           |
-| youcook2  | `/data/how2/youcook2/val/`           | `/data/how2/youcook2/embeddings/`          |
+| Dataset   | Kind  | Media path                                        | Output embeddings                          |
+| --------- | ----- | ------------------------------------------------- | ------------------------------------------ |
+| msr-vtt   | video | `/data/how2/msr-vtt/TestVideo/`                   | `/data/how2/msr-vtt/embeddings/`           |
+| youcook2  | video | `/data/how2/youcook2/val/`                        | `/data/how2/youcook2/embeddings/`          |
+| flickr8k  | image | `/data/how2/flickr8k/flickr8k-images/Flicker8k_Dataset/` | `data/embeddings/flickr8k/`         |
 
 Video-file extensions handled: `.mp4`, `.mkv`, `.webm`, `.avi`, `.mov`. The
 output filename is `<video_stem>.pkl`. Requires **both `ffmpeg` and `sox`** on
 `PATH` — audio is extracted as `ffmpeg -vn` → `sox gain -4 channels 1 rate
 16000`, matching the upstream How2 preprocessing so the trained model sees
 consistent audio at eval time.
+
+### Image datasets (Flickr8k)
+
+Datasets marked `kind: image` in `DATASETS` are still images paired with spoken
+captions, so there is no video track: V-JEPA2 is skipped entirely and only
+DINOv2 + WavLM are run. Because a still is a single frame, the DINOv2 CLS
+embedding is exactly what the 1 fps max-over-frames pooling would return for a
+one-frame video, so it drops into the same 768-d image slot.
+
+Flickr8k specifics — we use the 1,000-image **test** split
+(`Flickr_8k.testImages.txt`), each with 5 spoken captions from the Flickr8k
+Audio Caption Corpus (`wav2capt.txt` maps wav → image + caption index). The wavs
+are already mono 16 kHz, so they are read in place rather than re-encoded; the
+`sox gain -4` that `extract_audio` bakes into video-derived wavs is applied
+numerically instead (WavLM's feature extractor has `do_normalize=False`, so
+level matters in principle — in practice it moves R@10 by <0.1 pt).
+
+Per-image `.pkl` schema (note the plural `audio_embeddings`):
+
+```python
+{
+    "image_embedding": np.ndarray,   # (768,)    float32 — DINOv2 CLS
+    "audio_embeddings": np.ndarray,  # (5, 768)  float32 — WavLM, one per caption
+}
+```
 
 ## Training
 
@@ -123,6 +149,31 @@ Outputs:
 - Metrics logged to wandb (`train_loss`, `val_accuracy`, `val_r@5`, `val_r@10`,
   `best_val_r@5`, and the test-split equivalents). The wandb run config
   captures the hyperparameters loaded from the YAML.
+
+## Evaluation
+
+```bash
+uv run evaluate.py <config_name> [--datasets a,b,c]
+```
+
+Reports R@10 and MRR (video→audio retrieval, ranked within a single batch that
+holds the whole pool). Dataset names are either a How2 split
+(`how2-train`/`how2-val`/`how2-dev5`) or a key of `extract_features.DATASETS`;
+the default set is `how2-dev5,msr-vtt,youcook2`.
+
+Image datasets carry several spoken captions per image. Rather than picking one
+caption or stuffing all five into the same pool (which would put five copies of
+each image in the gallery and make the diagonal ambiguous), the evaluation runs
+one full retrieval per caption index and averages the metrics — so all 5,000
+Flickr8k captions are used, each in a clean 1,000-way task.
+
+They also have no video track, so evaluating a `use_video: true` checkpoint on
+them is rejected with an explicit error; use a `use_video: false` config such as
+`run-01-novideo`.
+
+```bash
+uv run evaluate.py run-01-novideo --datasets flickr8k
+```
 
 ## Qualitative retrieval viewer
 

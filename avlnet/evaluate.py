@@ -73,11 +73,54 @@ def _load_external_dataset(name: str):
     )
 
 
+def _load_image_dataset(name: str):
+    """Load the per-image embeddings written by `extract_features.py <name>`.
+
+    These datasets pair a still image with several spoken captions, so they yield
+    one trial per caption index rather than a single one. Each trial is a complete
+    retrieval task over all images, using that caption's audio; the metrics are
+    then averaged over trials, which uses every caption without ever putting two
+    copies of the same image into the same gallery.
+
+    There is no video track, so the video array is zero-width: `use_video=False`
+    models ignore it, and `use_video=True` models are rejected up front.
+    """
+    emb_dir = DATASETS[name]["embeddings_path"]
+    if not emb_dir.exists():
+        raise FileNotFoundError(
+            f"Embeddings directory does not exist: {emb_dir}. "
+            f"Run: uv run extract_features.py {name}"
+        )
+
+    paths = sorted(emb_dir.glob("*.pkl"))
+    if not paths:
+        raise FileNotFoundError(f"No .pkl files in {emb_dir}")
+
+    image, audio = [], []
+    for path in tqdm(paths, desc=f"Loading {name}"):
+        with open(path, "rb") as f:
+            d = pickle.load(f)
+        image.append(d["image_embedding"])
+        audio.append(d["audio_embeddings"])
+
+    image = np.stack(image).astype(np.float32)
+    audio = np.stack(audio).astype(np.float32)  # (n, n_captions, dim)
+    video = np.zeros((len(image), 0), dtype=np.float32)
+    return [(video, image, audio[:, i]) for i in range(audio.shape[1])]
+
+
 def _load_dataset(name: str, cfg: dict):
+    """Return a list of (video, image, audio) trials for `name`.
+
+    Most datasets have exactly one trial; see `_load_image_dataset` for the
+    multi-caption case.
+    """
     if name in HOW2_SPLITS:
-        return _load_how2_split(cfg["root"], HOW2_SPLITS[name])
+        return [_load_how2_split(cfg["root"], HOW2_SPLITS[name])]
     if name in DATASETS:
-        return _load_external_dataset(name)
+        if DATASETS[name].get("kind", "video") == "image":
+            return _load_image_dataset(name)
+        return [_load_external_dataset(name)]
     raise ValueError(
         f"Unknown dataset `{name}`. Available: "
         f"how2 splits {list(HOW2_SPLITS)} or external {sorted(DATASETS)}."
@@ -94,9 +137,13 @@ def main(config_name: str, datasets=None):
         uv run evaluate.py default
         uv run evaluate.py default --datasets msr-vtt,youcook2
         uv run evaluate.py default --datasets how2-val,how2-dev5
+        uv run evaluate.py run-01-novideo --datasets flickr8k
 
     `datasets` may be a comma-separated string or a list. Each name is either
     a How2 split (how2-train/how2-val/how2-dev5) or a key of extract_features.DATASETS.
+
+    Image datasets such as flickr8k have several spoken captions per image; their
+    metrics are averaged over one retrieval run per caption index.
     """
     if datasets is None:
         datasets = list(DEFAULT_DATASETS)
@@ -118,19 +165,35 @@ def main(config_name: str, datasets=None):
     model.eval()
 
     def get_result(name):
-        video, image, audio = _load_dataset(name, cfg)
-        dataset = _ArrayDataset(
-            torch.from_numpy(video),
-            torch.from_numpy(image),
-            torch.from_numpy(audio),
-        )
-        dataloader = torch.utils.data.DataLoader(
-            dataset,
-            batch_size=5000,
-            shuffle=False,
-            num_workers=0,
-        )
-        for metric_name, metric_value in evaluate(model, dataloader).items():
+        if (
+            name in DATASETS
+            and DATASETS[name].get("kind", "video") == "image"
+            and model.use_video
+        ):
+            raise ValueError(
+                f"Dataset `{name}` has no video track, but `{config_name}` was "
+                f"trained with use_video=true. Evaluate a use_video=false model "
+                f"on it instead (e.g. run-01-novideo)."
+            )
+
+        trials = _load_dataset(name, cfg)
+        metrics = []
+        for video, image, audio in trials:
+            dataset = _ArrayDataset(
+                torch.from_numpy(video),
+                torch.from_numpy(image),
+                torch.from_numpy(audio),
+            )
+            dataloader = torch.utils.data.DataLoader(
+                dataset,
+                batch_size=5000,
+                shuffle=False,
+                num_workers=0,
+            )
+            metrics.append(evaluate(model, dataloader))
+
+        for metric_name in metrics[0]:
+            metric_value = np.mean([m[metric_name] for m in metrics])
             if metric_name in {"r1", "r5", "r10"}:
                 metric_value = 100 * metric_value
             yield {
