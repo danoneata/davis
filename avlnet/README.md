@@ -43,9 +43,28 @@ Grouped `.pkl` schema (produced by `/data/how2/clean_code/segments/group_embeddi
 }
 ```
 
-Note: the grouped file drops the segment IDs — order comes from `os.listdir()`
-at grouping time. If you need IDs (e.g. for qualitative inspection), reload the
-per-segment `.pkl`s in `sorted(os.listdir(...))` order.
+> [!WARNING]
+> **The grouped files drop the segment IDs, and their row order is raw
+> `os.listdir()` order at grouping time — *not* sorted order.** Reloading the
+> per-segment `.pkl`s sorted by name lines up with nothing; this was verified
+> against the real data (200/200 spot-checks match `os.listdir`, 0/3 match
+> `sorted`). `group_embeddings.py` also `continue`s past unreadable files, so
+> the mapping is only recoverable while that directory listing is unchanged.
+>
+> `make_grouped_ids.py` freezes the ordering into a sidecar
+> `<split>_grouped_ids.json` (one ID per row of the grouped array) so it stops
+> depending on the live filesystem:
+>
+> ```bash
+> uv run make_grouped_ids.py train
+> ```
+>
+> It refuses to write unless a random sample of per-segment embeddings still
+> matches the corresponding grouped rows. `train_grouped_ids.json` already
+> exists (184,924 IDs). **Re-run it after regenerating any grouped `.pkl`, or
+> after adding/removing/renaming files under `embeddings/<split>/`** — the
+> spot-checks will catch a stale sidecar rather than let training silently use
+> mislabeled data.
 
 Feature-extraction code for How2 itself lives outside this repo at
 `/data/how2/clean_code/segments/` (`cache_embeddings.py`, `group_embeddings.py`,
@@ -127,6 +146,82 @@ use_video: true        # true: concat V-JEPA2 (1024) + DINOv2 (768) on the video
 checkpoint_dir: checkpoints
 ```
 
+### Training on a subset (`filter`)
+
+An optional `filter` key selects which training segments to keep. It applies to
+the **training set only** — validation and test stay whole, so runs remain
+comparable. It needs `<root>/train_grouped_ids.json` (see the warning above).
+
+Two filter types. `random` takes a uniform sample:
+
+```yaml
+filter:
+  type: random
+  n: 9829
+  seed: 42      # optional, defaults to 42
+```
+
+`from_list` keeps the segments whose record in a JSONL scores file satisfies a
+predicate. YAML has no lambdas, so predicates are data: a leaf is
+`{field, op, value}` with `op` one of `> >= < <= == != in`, and leaves nest
+under `all` / `any` / `not`. Nothing is `eval`'d.
+
+```yaml
+filter:
+  type: from_list
+  path: data/filelists/how2-train-alignment-scores.jsonl
+  predicate:
+    field: denseav_score
+    op: ">"
+    value: 3.0
+
+# compound:
+#   predicate:
+#     all:
+#       - {field: denseav_score, op: ">", value: 3.0}
+#       - {field: lm_score, op: ">=", value: 7}
+```
+
+Records are keyed by the stem of their `video_path`; the selection is the
+intersection with the embeddings, so scored segments without embeddings (25 of
+them in the alignment-scores file) are ignored. An empty selection, or one
+smaller than `batch_size` under `drop_last`, is an error rather than a silent
+no-op. See `filtering.py`.
+
+### Training budget (`max_steps`)
+
+Filtering shrinks the training set, so at fixed `n_epochs` it also shortens the
+run — `denseav_score > 3` keeps 9,829 segments (5.3%), which at `batch_size:
+128` is 7,600 steps against the full set's 144,400. That would confound data
+quality with training length. `max_steps` overrides the
+`n_epochs * steps_per_epoch` budget so both runs train equally long, with epochs
+simply repeating the smaller set:
+
+```yaml
+n_epochs: 100
+max_steps: 144400   # optional; when set, n_epochs only sets the epoch length
+```
+
+`max_steps` feeds the warmup and cosine schedule too, so the LR curve stretches
+to match. Also set `eval_every` explicitly when filtering: it defaults to one
+epoch, which on a small subset means far more frequent evaluations and hence a
+much tighter effective `patience`.
+
+The shipped `run-03` configs are a three-arm comparison — identical
+architecture (`use_video: false`, `projection_dim: 128`), batch size, eval
+cadence and 144,400-step budget, differing only in which segments they train on:
+
+| Config                        | Training set                  | Segments |
+| ----------------------------- | ----------------------------- | -------- |
+| `run-03-full`                 | everything (no filter)        | 184,924  |
+| `run-03-denseav3`             | `denseav_score > 3`           | 9,829    |
+| `run-03-random9829`           | random, size-matched, seed 42 | 9,829    |
+
+`run-03-full` needs no `max_steps`: its natural budget already *is* 144,400.
+
+The wandb run config records `filter`, `n_train` (segments actually trained on)
+and `max_steps`.
+
 To create a new experiment: drop a new file under `configs/` (e.g.
 `configs/proj_512_no_video.yaml`) and reference it by its basename.
 
@@ -195,3 +290,18 @@ Sidebar controls:
 On first use of a split the app builds a single-file pool cache
 (`cache/pool_<split>.pkl`, IDs + stacked embedding arrays); later runs skip
 that step. `train` takes a few minutes on cold disk; `val` and `dev5` are ~5 s.
+
+## Alignment-scores viewer
+
+`data/filelists/how2-train-alignment-scores.jsonl` holds one record per train
+segment (184,949 lines) with an `lm_score` (integer 1–10) and a
+`denseav_score` (float), alongside the ASR transcript (`text`) and
+`video_caption`. It is what `filter: {type: from_list}` reads.
+
+`show_alignment_scores.py` browses it — video, transcript, caption and both
+scores per segment, sorted by either score, with range filters, a text search
+and score histograms.
+
+```bash
+uv run streamlit run show_alignment_scores.py
+```

@@ -1,0 +1,11 @@
+root: /data/how2/clean_code/how2/embeddings
+batch_size: 128
+n_epochs: 100
+projection_dim: 128
+use_video: false
+checkpoint_dir: checkpoints
+eval_every: 500
+# Unfiltered control for the run-03 pair: same architecture, batch size and eval
+# cadence as run-03-denseav3 / run-03-random9829, trained on all 184,924 segments.
+# No max_steps needed -- its natural budget (1444 steps/epoch x 100) is the 144400
+# the filtered runs pin themselves to.

@@ -11,6 +11,9 @@ import math
 import yaml
 from pathlib import Path
 
+from filtering import select_indices
+from make_grouped_ids import load_grouped_ids
+
 
 CONFIGS_DIR = Path(__file__).parent / "configs"
 
@@ -28,19 +31,23 @@ def load_config(config_name: str) -> dict:
 
 
 class Dataset(torch.utils.data.Dataset):
-    def __init__(self, embeddings_path: str):
+    def __init__(self, embeddings_path: str, indices=None):
+        """`indices` restricts the dataset to a subset of rows; None uses all of them."""
         with open(embeddings_path, "rb") as f:
             self.embeddings = pickle.load(f)
+        n = len(self.embeddings["video_embeddings"])
+        self.indices = np.arange(n) if indices is None else np.asarray(indices)
 
     def __getitem__(self, idx):
+        i = self.indices[idx]
         return (
-            self.embeddings["video_embeddings"][idx],
-            self.embeddings["image_embeddings"][idx],
-            self.embeddings["audio_embeddings"][idx]
+            self.embeddings["video_embeddings"][i],
+            self.embeddings["image_embeddings"][i],
+            self.embeddings["audio_embeddings"][i]
         )
 
     def __len__(self):
-        return len(self.embeddings["video_embeddings"])
+        return len(self.indices)
 
 
 class Adapter(torch.nn.Module):
@@ -163,6 +170,8 @@ def run_training(
     patience: int = 10,
     select_metric: str = "r5",
     drop_last: bool = True,
+    filter: dict = None,
+    max_steps: int = None,
 ):
     """Train the SigLIP adapters on precomputed How2 embeddings.
 
@@ -180,6 +189,14 @@ def run_training(
     evaluations without improvement on `select_metric` (0 disables early
     stopping). The best checkpoint is always kept, so early stopping only saves
     compute -- it cannot change the reported numbers.
+
+    `filter` selects which training segments to keep (see `filtering.py`); it
+    applies to the training set only, so validation and test stay comparable
+    across runs. `max_steps` overrides the `n_epochs * steps_per_epoch` budget,
+    which is what keeps a filtered run as long as an unfiltered one instead of
+    confounding data quality with training length. Since a filtered set also
+    makes epochs shorter, set `eval_every` explicitly when filtering, or the
+    evaluation cadence -- and with it the effective patience -- shifts too.
     """
     train_embeddings = os.path.join(root, "train_grouped_embeddings.pkl")
     val_embeddings = os.path.join(root, "val_grouped_embeddings.pkl")
@@ -187,6 +204,17 @@ def run_training(
 
     checkpoint_path = os.path.join(checkpoint_dir, experiment_name, "best.pt")
     os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
+
+    # Resolved before wandb.init so the selected size can be logged with the config.
+    train_indices = None
+    if filter is not None:
+        train_indices = select_indices(
+            filter,
+            load_grouped_ids(root, "train"),
+            min_size=batch_size if drop_last else 1,
+        )
+
+    dataset = Dataset(train_embeddings, indices=train_indices)
 
     wandb.init(
         project="avlnet",
@@ -201,10 +229,12 @@ def run_training(
             "lr": scale_lr(batch_size),
             "patience": patience,
             "select_metric": select_metric,
+            "filter": filter,
+            "n_train": len(dataset),
+            "max_steps": max_steps,
         }
     )
 
-    dataset = Dataset(train_embeddings)
     dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_size=batch_size,
@@ -252,7 +282,15 @@ def run_training(
     optimizer.zero_grad()
 
     steps_per_epoch = len(dataloader)
-    total_steps = n_epochs * steps_per_epoch
+    if steps_per_epoch == 0:
+        raise ValueError(
+            f"Training set has {len(dataset)} segments, fewer than batch_size="
+            f"{batch_size} with drop_last={drop_last}: no steps would run."
+        )
+    # `max_steps` decouples the training length from the dataset size, so a filtered
+    # run can be as long as an unfiltered one; epochs then just repeat the subset.
+    total_steps = max_steps if max_steps is not None else n_epochs * steps_per_epoch
+    n_epochs_effective = math.ceil(total_steps / steps_per_epoch)
     warmup_steps = int(0.1 * total_steps)
     def lr_lambda(current_step: int):
         if current_step < warmup_steps:
@@ -310,9 +348,12 @@ def run_training(
 
         siglip.train()
 
-    for epoch in tqdm(range(n_epochs), total=n_epochs, desc="Training"):
+    for epoch in tqdm(range(n_epochs_effective), total=n_epochs_effective, desc="Training"):
         siglip.train()
         for batch in dataloader:
+            if global_step >= total_steps:
+                break
+
             video_embeddings, image_embeddings, audio_embeddings = batch
             video_embeddings = video_embeddings.cuda()
             image_embeddings = image_embeddings.cuda()
@@ -356,13 +397,13 @@ def run_training(
                     stop_early = True
                     break
 
-        if stop_early:
+        if stop_early or global_step >= total_steps:
             break
 
     # Make sure the final state is scored even if the run does not end on an
     # evaluation boundary.
     if global_step % eval_every != 0 and not stop_early:
-        run_evaluation(n_epochs - 1)
+        run_evaluation(n_epochs_effective - 1)
 
     wandb.summary[f"best_val_{select_metric}"] = best_val
     wandb.summary["stopped_early"] = stop_early

@@ -1,0 +1,18 @@
+root: /data/how2/clean_code/how2/embeddings
+batch_size: 128
+n_epochs: 100
+projection_dim: 128
+use_video: false
+checkpoint_dir: checkpoints
+eval_every: 500
+# Same step budget as the unfiltered run-01-novideo (184924 // 128 = 1444 steps per
+# epoch, x 100 epochs), so this run differs from it only in which segments it sees,
+# not in how long it trains.
+max_steps: 144400
+filter:
+  type: from_list
+  path: data/filelists/how2-train-alignment-scores.jsonl
+  predicate:
+    field: denseav_score
+    op: ">"
+    value: 3.0
