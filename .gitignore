@@ -1,0 +1,6 @@
+wandb
+__pycache__
+davis.egg-info
+checkpoints
+data
+cache
