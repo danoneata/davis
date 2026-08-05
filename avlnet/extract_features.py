@@ -6,7 +6,7 @@ import warnings
 
 from pathlib import Path
 
-import fire
+import click
 import numpy as np
 import soundfile as sf
 import torch
@@ -393,6 +393,8 @@ EXTRACTORS = {
 }
 
 
+@click.command()
+@click.argument("dataset_name", type=click.Choice(DATASETS.keys()))
 def main(dataset_name: str):
     """Extract features for every item in a registered dataset.
 
@@ -406,19 +408,10 @@ def main(dataset_name: str):
         uv run extract_features.py youcook2
         uv run extract_features.py flickr8k
     """
-    if dataset_name not in DATASETS:
-        raise ValueError(
-            f"Unknown dataset `{dataset_name}`. Available: {sorted(DATASETS)}"
-        )
     cfg = DATASETS[dataset_name]
-    kind = cfg.get("kind", "video")
-    if kind not in EXTRACTORS:
-        raise ValueError(
-            f"Dataset `{dataset_name}` has unknown kind `{kind}`. "
-            f"Available: {sorted(EXTRACTORS)}"
-        )
+    kind = cfg["kind"]
     return EXTRACTORS[kind](dataset_name, cfg)
 
 
 if __name__ == "__main__":
-    fire.Fire(main)
+    main()
