@@ -85,8 +85,9 @@ def build_video_pool_cache(dataset: str, cache_path: Path) -> Path:
             continue
         image_embedding = d["image_embedding"]
         if image_embedding.ndim == 2:
-            # Some datasets store per-frame image features; pool as in evaluate.py.
-            image_embedding = image_embedding.mean(axis=0)
+            # Some datasets store per-frame image features; pool as in evaluate.py,
+            # with `max` to match how the training features were built.
+            image_embedding = image_embedding.max(axis=0)
         ids.append(name[:-4])
         video.append(d["video_embedding"])
         image.append(image_embedding)

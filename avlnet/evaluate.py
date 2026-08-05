@@ -61,7 +61,12 @@ def _load_external_dataset(name: str):
         with open(path, "rb") as f:
             d = pickle.load(f)
         if d["image_embedding"].ndim == 2:
-            d["image_embedding"] = d["image_embedding"].mean(axis=0)
+            # Some feature sets store the raw per-frame DINOv2 embeddings. Pool them
+            # with `max`, not `mean`: both extraction pipelines the model was trained
+            # on max over the 1 fps frames (`extract_features.get_dinov2_embeddings_1fps`
+            # and How2's own cache_embeddings.py), so mean pooling would feed it a
+            # statistic it has never seen.
+            d["image_embedding"] = d["image_embedding"].max(axis=0)
         video.append(d["video_embedding"])
         image.append(d["image_embedding"])
         audio.append(d["audio_embedding"])
