@@ -115,9 +115,21 @@ removed rather than merely wrapped.
 
 > [!NOTE]
 > Embeddings extracted before this change came from seek-selected frames, so
-> re-extracting a dataset will not reproduce them bit-for-bit. How2's own
-> `cache_embeddings.py` uses `vr[idx]` too, so the training features carry the
-> same exposure.
+> re-extracting a dataset will not reproduce them bit-for-bit **where the seeking
+> was wrong**. How2's own `cache_embeddings.py` uses `vr[idx]` too, but its
+> segments appear to be clean: on a 40-segment dev5 sample, seeking and reading
+> forward return byte-identical frames for all 40, for both the 64-frame V-JEPA2
+> set and the 1 fps set. The 184,924 train segments have not been checked.
+
+Re-extracting How2 dev5 with `extract_features.py` reproduces
+`/data/how2/clean_code/how2/embeddings/dev5` (see `compare_embeddings.py`):
+audio at cosine 1.000000, image at median 1.000000 (minimum 0.999995), video at
+median 0.999843 (minimum 0.998392). The wider spread on video is float16 —
+V-JEPA2 is the one model loaded in half precision — and is not attributable to
+decoding: the frames are identical and this pipeline is bit-deterministic across
+reruns, so the residual is the hardware and library versions that produced the
+stored set. Note `--rtol/--atol` defaults are tighter than fp16 noise, so
+`allclose` reads 0% there while the cosines are ~1.
 
 Video-file extensions handled: `.mp4`, `.mkv`, `.webm`, `.avi`, `.mov`, though
 decord in this environment cannot seek or decode VP8/VP9 — all 96 `.webm` files
