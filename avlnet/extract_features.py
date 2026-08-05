@@ -58,6 +58,8 @@ DATASETS = {
         # Already mono 16 kHz, so we read them in place instead of re-encoding.
         "audios_path": Path("/data/how2/flickr8k/flickr8k-audio/wavs"),
         "wav2capt_path": Path("/data/how2/flickr8k/flickr8k-audio/wav2capt.txt"),
+        # Transcripts of the spoken captions; used by the viewers, not by extraction.
+        "captions_path": Path("/data/how2/flickr8k/flickr8k-text/Flickr8k.token.txt"),
         "selected_files": Path(
             "/data/how2/flickr8k/flickr8k-text/Flickr_8k.testImages.txt"
         ),

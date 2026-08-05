@@ -280,16 +280,39 @@ uv run streamlit run show_results.py
 ```
 
 Sidebar controls:
-- **Split** — `val`, `dev5`, or `train`.
-- **Direction** — `audio→video` or `video→audio`.
-- **Checkpoint path** — defaults to `checkpoints/run-00/best.pt`.
+- **Model** — a subdirectory of `checkpoints/`; the architecture is rebuilt from
+  the config stored inside `best.pt`.
+- **Dataset** — a How2 split (`how2-val`, `how2-dev5`, `how2-train`) or a key of
+  `extract_features.DATASETS` (`msr-vtt`, `youcook2`, `flickr8k`).
+- **Direction** — `audio→video` or `video→audio` (shown as `audio→image` /
+  `image→audio` for image datasets).
+- **Caption** (image datasets only) — `all`, or a single caption index.
 - **Pool size** — `full`, or a smaller sample (`500` / `2000` / `10000` /
   custom) for a faster UI. Subsample is deterministic (fixed seed).
 - **Top-K** — 1–20.
 
-On first use of a split the app builds a single-file pool cache
-(`cache/pool_<split>.pkl`, IDs + stacked embedding arrays); later runs skip
-that step. `train` takes a few minutes on cold disk; `val` and `dev5` are ~5 s.
+On first use of a dataset the app builds a single-file pool cache
+(`cache/pool_<tag>.pkl`, IDs + stacked embedding arrays; `_img` suffix for image
+datasets, whose payload has a different shape); later runs skip that step.
+`train` takes a few minutes on cold disk; `val` and `dev5` are ~5 s.
+
+### Image datasets in the viewer
+
+Flickr8k renders as JPEGs and audio players, with each clip's transcript (from
+`Flickr8k.token.txt`) printed underneath. As in the evaluation, it needs a
+`use_video: false` checkpoint; picking one trained with video shows an error
+instead of results.
+
+The **Caption** control decides how the five captions per image are used:
+
+- A single index gives a clean 1,000-way task and reproduces exactly one of the
+  trials `evaluate.py` averages — the viewer's R@10 for caption `c` equals that
+  trial's, and the mean over the five equals the reported number.
+- `all` uses every caption at once: `audio→image` runs 5,000 queries against the
+  1,000-image gallery (one correct answer each), and `image→audio` runs 1,000
+  queries against a 5,000-clip gallery where **all five** captions of the query
+  image count as correct. The reported ground-truth rank is the rank of the
+  best-scoring correct answer, and every correct clip is marked ✅ in the results.
 
 ## Alignment-scores viewer
 
