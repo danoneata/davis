@@ -91,6 +91,10 @@ Registered datasets (edit the `DATASETS` dict at the top of the file to add more
 | youcook2  | video | `/data/how2/youcook2/val/`                        | `/data/how2/youcook2/embeddings/`          |
 | flickr8k  | image | `/data/how2/flickr8k/flickr8k-images/Flicker8k_Dataset/` | `data/embeddings/flickr8k/`         |
 
+Each dataset's `kind` picks its pipeline: `main` looks it up in the `EXTRACTORS`
+table and calls the matching `extract_<kind>_dataset(dataset_name, cfg)`, so
+supporting a new modality means writing one function and registering it there.
+
 Video-file extensions handled: `.mp4`, `.mkv`, `.webm`, `.avi`, `.mov`. The
 output filename is `<video_stem>.pkl`. Requires **both `ffmpeg` and `sox`** on
 `PATH` — audio is extracted as `ffmpeg -vn` → `sox gain -4 channels 1 rate

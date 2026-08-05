@@ -308,29 +308,13 @@ def extract_image_dataset(dataset_name: str, cfg: dict):
     print(f"Done: {n_done} new, {n_skipped} already-existing, {n_failed} failed.")
 
 
-def main(dataset_name: str):
-    """Extract V-JEPA2 + DINOv2 + WavLM features for every item in a registered dataset.
+def extract_video_dataset(dataset_name: str, cfg: dict):
+    """Extract V-JEPA2 + DINOv2 + WavLM features for a dataset of videos.
 
-    Paths per dataset come from `DATASETS`. Writes one <segment_id>.pkl per video to
-    `embeddings_path`, skipping any that already exist. Audio is extracted on the fly
-    to `audios_path` (also cached, so re-runs skip ffmpeg).
-
-    Image datasets (`kind: image`, e.g. Flickr8k) have no video track, so they skip
-    V-JEPA2 and are handled by `extract_image_dataset`.
-
-    Example:
-        uv run extract_features.py msr-vtt
-        uv run extract_features.py youcook2
-        uv run extract_features.py flickr8k
+    Writes one <segment_id>.pkl per video holding a `video_embedding`, an
+    `image_embedding` and an `audio_embedding`. Audio is extracted on the fly to
+    `audios_path` (cached, so re-runs skip ffmpeg).
     """
-    if dataset_name not in DATASETS:
-        raise ValueError(
-            f"Unknown dataset `{dataset_name}`. Available: {sorted(DATASETS)}"
-        )
-    cfg = DATASETS[dataset_name]
-    if cfg.get("kind", "video") == "image":
-        return extract_image_dataset(dataset_name, cfg)
-
     videos_path = cfg["videos_path"]
     embeddings_path = cfg["embeddings_path"]
     audios_path = cfg["audios_path"]
@@ -399,6 +383,41 @@ def main(dataset_name: str):
         n_done += 1
 
     print(f"Done: {n_done} new, {n_skipped} already-existing, {n_failed} failed.")
+
+
+# The extraction pipeline for each `kind` in `DATASETS`; adding a modality means
+# writing an `extract_<kind>_dataset` and registering it here.
+EXTRACTORS = {
+    "video": extract_video_dataset,
+    "image": extract_image_dataset,
+}
+
+
+def main(dataset_name: str):
+    """Extract features for every item in a registered dataset.
+
+    Paths per dataset come from `DATASETS`, and its `kind` selects the pipeline:
+    `video` datasets go through V-JEPA2 + DINOv2 + WavLM, while `image` ones
+    (e.g. Flickr8k) have no video track and skip V-JEPA2. Items whose embeddings
+    already exist are skipped.
+
+    Example:
+        uv run extract_features.py msr-vtt
+        uv run extract_features.py youcook2
+        uv run extract_features.py flickr8k
+    """
+    if dataset_name not in DATASETS:
+        raise ValueError(
+            f"Unknown dataset `{dataset_name}`. Available: {sorted(DATASETS)}"
+        )
+    cfg = DATASETS[dataset_name]
+    kind = cfg.get("kind", "video")
+    if kind not in EXTRACTORS:
+        raise ValueError(
+            f"Dataset `{dataset_name}` has unknown kind `{kind}`. "
+            f"Available: {sorted(EXTRACTORS)}"
+        )
+    return EXTRACTORS[kind](dataset_name, cfg)
 
 
 if __name__ == "__main__":
