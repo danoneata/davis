@@ -152,6 +152,29 @@ Per-image `.pkl` schema (note the plural `audio_embeddings`):
 }
 ```
 
+## Comparing two feature sets
+
+When the same dataset exists in two places — a re-extraction, another machine,
+someone else's pipeline — `compare_embeddings.py` reports how closely they agree:
+
+```bash
+uv run compare_embeddings.py data/embeddings/youcook2 \
+    /data/how2/evaluation_data/youcook2/embeddings
+```
+
+Items are matched by filename stem and only shared keys are compared, so feature
+sets with different schemas still line up on what they have in common. A 2-D
+per-frame array is collapsed with `--pool` (`max`, the default, matching
+extraction; `mean`; or `none` to compare per-frame arrays element-wise). Read the
+cosine similarity: these embeddings are used for retrieval, where direction
+matters and scale does not.
+
+Worth knowing before comparing against `/data/how2/evaluation_data/youcook2`:
+that feature set caps the image side at **10 frames** per clip, while extraction
+here takes a true 1 fps sample (up to 72 frames on these segments). The audio
+sides agree (median cosine 0.999999) but the image and video sides do not
+(median 0.97), so the two are not interchangeable.
+
 ## Training
 
 Every run is identified by a config name. The config lives at
