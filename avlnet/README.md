@@ -96,7 +96,32 @@ Each dataset's `kind` picks its pipeline: `main` looks it up in the `EXTRACTORS`
 table and calls the matching `extract_<kind>_dataset(dataset_name, cfg)`, so
 supporting a new modality means writing one function and registering it there.
 
-Video-file extensions handled: `.mp4`, `.mkv`, `.webm`, `.avi`, `.mov`. The
+### Frame decoding
+
+Frames are read by decoding forward from the start (`read_frames`), never by
+seeking. Decord's random access (`get_batch`, `vr[i]`) goes through
+`seek_accurate`, which on these files is both **wrong and unreliable**: on 15 of
+the 3,179 youcook2 segments it spins at 100% CPU indefinitely, and on many others
+it silently returns the wrong frame — for `-AwyG1JcMp8_0.mp4`, 57 of 64 sampled
+frames disagreed with a sequential read, and cross-checking frame 800 against
+`ffmpeg` showed the sequential frame is the correct one. A sequential pass is
+also faster at segment length, so there is no tradeoff.
+
+Each item additionally runs under a `time_limit` of `ITEM_TIMEOUT_SECONDS`, so a
+pathological file is reported as `[error]` and skipped rather than wedging a long
+run. The guard is SIGALRM-based and fires between decoded frames; it cannot
+interrupt a single hung call inside a C extension, which is why the seeking was
+removed rather than merely wrapped.
+
+> [!NOTE]
+> Embeddings extracted before this change came from seek-selected frames, so
+> re-extracting a dataset will not reproduce them bit-for-bit. How2's own
+> `cache_embeddings.py` uses `vr[idx]` too, so the training features carry the
+> same exposure.
+
+Video-file extensions handled: `.mp4`, `.mkv`, `.webm`, `.avi`, `.mov`, though
+decord in this environment cannot seek or decode VP8/VP9 — all 96 `.webm` files
+in youcook2 fail with `DECORDError` and are skipped. The
 output filename is `<video_stem>.pkl`. Requires **both `ffmpeg` and `sox`** on
 `PATH` — audio is extracted as `ffmpeg -vn` → `sox gain -4 channels 1 rate
 16000`, matching the upstream How2 preprocessing so the trained model sees

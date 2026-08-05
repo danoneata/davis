@@ -1,9 +1,11 @@
 import os
 import pickle
+import signal
 import subprocess
 import tempfile
 import warnings
 
+from contextlib import contextmanager
 from pathlib import Path
 
 import click
@@ -48,8 +50,8 @@ DATASETS = {
         "videos_path": Path("/data/how2/youcook2/val"),
         "selected_files": Path("/data/how2/avlnet-data/youcook_val_ids_common.txt"),
         # Antonio's embeddings path
-        "embeddings_path": Path("/data/how2/evaluation_data/youcook2/embeddings"),
-        # "embeddings_path": DATA_DIR / "embeddings" / "youcook2",
+        # "embeddings_path": Path("/data/how2/evaluation_data/youcook2/embeddings"),
+        "embeddings_path": DATA_DIR / "embeddings" / "youcook2",
         "audios_path": DATA_DIR / "audios" / "youcook2",
     },
     "flickr8k": {
@@ -68,9 +70,60 @@ DATASETS = {
 }
 
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".webm", ".avi", ".mov"}
+# Backstop for a single item, well above the seconds a segment normally takes. A
+# file that blows past it is reported as an error and skipped, so one pathological
+# video cannot wedge an overnight run.
+ITEM_TIMEOUT_SECONDS = 300
 VIDEO_MODEL_NAME = "facebook/vjepa2-vitl-fpc64-256"
 IMAGE_MODEL_NAME = "facebook/dinov2-base"
 AUDIO_MODEL_NAME = "microsoft/wavlm-base-plus"
+
+
+@contextmanager
+def time_limit(seconds: int, message: str):
+    """Raise `TimeoutError` if the block runs longer than `seconds`.
+
+    SIGALRM only takes effect once the interpreter regains control, which is
+    exactly what `read_frames` gives it -- the decode loop returns to Python
+    after every frame. It cannot interrupt a single long call inside a C
+    extension, which is why the seeking that used to hang was removed rather
+    than merely wrapped in this.
+    """
+
+    def handler(signum, frame):
+        raise TimeoutError(message)
+
+    previous = signal.signal(signal.SIGALRM, handler)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+def read_frames(vr, indices):
+    """Decode `indices` out of `vr` with a single sequential pass.
+
+    Decord's random access -- `get_batch` and `vr[i]` alike -- goes through
+    `seek_accurate`, which spins forever on files whose timestamps are
+    inconsistent with their frame count. 15 of the youcook2 segments hang
+    indefinitely that way; reading forward instead lets decord recover the
+    corrupt frames from their neighbours, and for segment-length videos it is
+    faster than seeking anyway.
+
+    Duplicate indices are fine (short videos oversampled by `linspace`), and
+    decoding stops after the highest one.
+    """
+    wanted = {int(i) for i in indices}
+    if not wanted:
+        raise ValueError("No frames requested; the video appears to be empty.")
+    frames = {}
+    for i in range(max(wanted) + 1):
+        frame = vr.next()
+        if i in wanted:
+            frames[i] = frame.asnumpy()
+    return np.stack([frames[int(i)] for i in indices])
 
 
 @torch.no_grad()
@@ -79,7 +132,7 @@ def get_vjepa2_embedding(video_path, model, processor):
     vr = VideoReader(str(video_path), ctx=cpu(0))
     total_frames = len(vr)
     indices = np.linspace(0, total_frames - 1, num_frames).astype(int)
-    frames = vr.get_batch(indices).asnumpy()
+    frames = read_frames(vr, indices)
     frames = torch.from_numpy(frames).permute(0, 3, 1, 2)
 
     inputs = processor(frames, return_tensors="pt")
@@ -112,8 +165,8 @@ def get_dinov2_embeddings_1fps(video_path, model, processor, pool: str = "cls"):
     frame_indices = np.arange(0, num_frames, max(1, int(round(fps))))
 
     embeddings = [
-        _embed_image(Image.fromarray(vr[idx].asnumpy()), model, processor, pool)
-        for idx in frame_indices
+        _embed_image(Image.fromarray(frame), model, processor, pool)
+        for frame in read_frames(vr, frame_indices)
     ]
     return np.stack(embeddings, axis=0).max(axis=0)
 
@@ -273,23 +326,26 @@ def extract_image_dataset(dataset_name: str, cfg: dict):
             continue
 
         try:
-            image_embedding = get_dinov2_embedding(
-                images_path / f"{image_id}.jpg",
-                image_model,
-                image_processor,
-                pool="cls",
-            )
-            audio_embeddings = np.stack(
-                [
-                    get_wavlm_embedding(
-                        audios_path / wav_name,
-                        audio_model,
-                        audio_processor,
-                        gain_db=-4.0,
-                    )
-                    for wav_name in captions[image_id]
-                ]
-            )
+            with time_limit(
+                ITEM_TIMEOUT_SECONDS, f"timed out after {ITEM_TIMEOUT_SECONDS}s"
+            ):
+                image_embedding = get_dinov2_embedding(
+                    images_path / f"{image_id}.jpg",
+                    image_model,
+                    image_processor,
+                    pool="cls",
+                )
+                audio_embeddings = np.stack(
+                    [
+                        get_wavlm_embedding(
+                            audios_path / wav_name,
+                            audio_model,
+                            audio_processor,
+                            gain_db=-4.0,
+                        )
+                        for wav_name in captions[image_id]
+                    ]
+                )
         except Exception as e:
             print(f"[error] {image_id}: {e}")
             n_failed += 1
@@ -349,23 +405,26 @@ def extract_video_dataset(dataset_name: str, cfg: dict):
             continue
 
         try:
-            extract_audio(video_file, wav_path)
-            video_embedding = get_vjepa2_embedding(
-                video_file,
-                video_model,
-                video_processor,
-            )
-            image_embedding = get_dinov2_embeddings_1fps(
-                video_file,
-                image_model,
-                image_processor,
-                pool="cls",
-            )
-            audio_embedding = get_wavlm_embedding(
-                wav_path,
-                audio_model,
-                audio_processor,
-            )
+            with time_limit(
+                ITEM_TIMEOUT_SECONDS, f"timed out after {ITEM_TIMEOUT_SECONDS}s"
+            ):
+                extract_audio(video_file, wav_path)
+                video_embedding = get_vjepa2_embedding(
+                    video_file,
+                    video_model,
+                    video_processor,
+                )
+                image_embedding = get_dinov2_embeddings_1fps(
+                    video_file,
+                    image_model,
+                    image_processor,
+                    pool="cls",
+                )
+                audio_embedding = get_wavlm_embedding(
+                    wav_path,
+                    audio_model,
+                    audio_processor,
+                )
         except Exception as e:
             print(f"[error] {segment_id}: {e}")
             n_failed += 1
