@@ -8,7 +8,7 @@ from tqdm import tqdm
 import pandas as pd
 
 from extract_features import DATASETS
-from siglip import SigLIP, evaluate, load_config
+from train import DualEncoder, evaluate, load_config
 
 
 HOW2_SPLITS = {
@@ -160,7 +160,7 @@ def main(config_name: str, datasets=None):
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    model = SigLIP(**ckpt.get("config", {})).to(device)
+    model = DualEncoder(**ckpt.get("config", {})).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
 

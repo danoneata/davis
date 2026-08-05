@@ -10,7 +10,7 @@ from tqdm import tqdm
 
 from evaluate import HOW2_SPLITS
 from extract_features import DATASETS, list_videos, read_wav2capt
-from siglip import SigLIP
+from train import DualEncoder
 from utils import read_file
 
 SEGMENTS_ROOT = Path("/data/how2/clean_code/how2/segments")
@@ -22,7 +22,7 @@ DATASETS_ALL = ["how2-val", "how2-dev5", "how2-train", *sorted(DATASETS)]
 MAX_TOPK = 20
 BATCH_SIZE = 256
 # The two sides of a retrieval pair. "visual" is a video for video datasets and a
-# still image for image datasets; it is the side `SigLIP.video_adapter` encodes.
+# still image for image datasets; it is the side `DualEncoder.video_adapter` encodes.
 VISUAL, AUDIO = "visual", "audio"
 
 
@@ -156,11 +156,11 @@ def load_pool(dataset: str) -> dict:
 
 
 @st.cache_resource(show_spinner="Loading model…")
-def load_model(checkpoint_path: str) -> tuple[SigLIP, torch.device]:
+def load_model(checkpoint_path: str) -> tuple[DualEncoder, torch.device]:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     config = ckpt.get("config", {}) if isinstance(ckpt, dict) else {}
-    model = SigLIP(**config).to(device)
+    model = DualEncoder(**config).to(device)
     state_dict = (
         ckpt["model_state_dict"]
         if isinstance(ckpt, dict) and "model_state_dict" in ckpt
@@ -548,8 +548,8 @@ def direction_label(dataset: str, direction: str) -> str:
 
 
 def main():
-    st.set_page_config(page_title="SigLIP retrieval viewer", layout="wide")
-    st.title("SigLIP qualitative retrieval")
+    st.set_page_config(page_title="Retrieval viewer", layout="wide")
+    st.title("Qualitative retrieval")
 
     with st.sidebar:
         st.header("Configuration")

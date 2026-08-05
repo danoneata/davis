@@ -1,8 +1,9 @@
-# AVLNet — SigLIP audio-visual alignment
+# AVLNet — contrastive audio-visual alignment
 
-Small SigLIP-style model that learns a joint audio-visual space on top of frozen
+Small dual-encoder model that learns a joint audio-visual space on top of frozen
 per-segment embeddings (V-JEPA2 video + DINOv2 image + WavLM audio) extracted
-from the How2 300h dataset.
+from the How2 300h dataset. The contrastive objective is configurable: a
+SigLIP-style sigmoid pairwise loss (the default) or symmetric InfoNCE.
 
 ## Setup
 
@@ -135,7 +136,7 @@ run parameters stay in sync — to change anything, edit the YAML (or create a
 new one) rather than passing CLI flags.
 
 ```bash
-uv run siglip.py <config_name>
+uv run train.py <config_name>
 ```
 
 Config file schema (`configs/default.yaml`):
@@ -147,8 +148,31 @@ n_epochs: 100
 projection_dim: 1024   # output dim of both adapters (joint embedding size)
 use_video: true        # true: concat V-JEPA2 (1024) + DINOv2 (768) on the video side
                        # false: use DINOv2 (768) only
+loss: siglip           # siglip (sigmoid pairwise) or infonce (symmetric CLIP)
 checkpoint_dir: checkpoints
 ```
+
+### Objectives (`loss`)
+
+The training objective is a config key, resolved through the `LOSSES` table in
+`train.py`; adding one means writing a
+`<name>_loss(model, video_embeddings, audio_embeddings)` and registering it there.
+
+| `loss`    | Definition                                                              |
+| --------- | ----------------------------------------------------------------------- |
+| `siglip`  | Sigmoid pairwise loss: each pair is an independent binary decision, with a learnable temperature and bias. Default. |
+| `infonce` | Symmetric InfoNCE (CLIP): softmax cross-entropy over rows and columns, averaged. Uses the temperature; the bias cancels in a softmax and stays unused. |
+
+Both share the same model — the loss is a training-time choice only, so a
+checkpoint can be evaluated without knowing which one produced it. They also
+share the temperature parameterisation and its initialisation (`exp(t_prime)`,
+starting at 10), so two runs differing only in `loss` start from the same place.
+
+The one thing to hold fixed when comparing them is **batch size**: InfoNCE
+normalises over the batch and the sigmoid loss does not, which is precisely what
+SigLIP claims as its advantage at scale. `run-03-full` (siglip) and
+`run-04-full` (infonce) are such a pair, both at `batch_size: 128`; a conclusion
+drawn there does not transfer to other batch sizes without re-running.
 
 ### Training on a subset (`filter`)
 
@@ -233,10 +257,10 @@ Examples:
 
 ```bash
 # Run with the settings in configs/default.yaml
-uv run siglip.py default
+uv run train.py default
 
 # A dedicated ablation config
-uv run siglip.py proj_512_no_video
+uv run train.py proj_512_no_video
 ```
 
 Outputs:

@@ -82,7 +82,14 @@ def scale_lr(batch_size: int) -> float:
     return BASE_LR * math.sqrt(batch_size / BASE_BATCH_SIZE)
 
 
-class SigLIP(torch.nn.Module):
+class DualEncoder(torch.nn.Module):
+    """Two adapters projecting the video and audio sides into a shared space.
+
+    The objective is not part of the model: `t_prime` (a log-temperature) and `b`
+    (a logit bias) are always present, and each loss in `LOSSES` uses the ones it
+    needs -- InfoNCE leaves `b` untouched.
+    """
+
     def __init__(self, projection_dim: int = 1024, use_video: bool = True):
         super().__init__()
         self.projection_dim = projection_dim
@@ -106,40 +113,61 @@ class SigLIP(torch.nn.Module):
             audio_embeddings = torch.nn.functional.normalize(audio_embeddings, p=2, dim=1)
         return video_embeddings, audio_embeddings
 
-    def loss(self, video_embeddings, audio_embeddings, normalize=True):
-        video_embeddings = self.video_adapter(video_embeddings)
-        audio_embeddings = self.audio_adapter(audio_embeddings)
-        if normalize:
-            video_embeddings = torch.nn.functional.normalize(video_embeddings, p=2, dim=1)
-            audio_embeddings = torch.nn.functional.normalize(audio_embeddings, p=2, dim=1)
-        t = torch.exp(self.t_prime)
-        zvideo = torch.nn.functional.normalize(video_embeddings, p=2, dim=1)
-        zaudio = torch.nn.functional.normalize(audio_embeddings, p=2, dim=1)
-        logits = torch.matmul(zvideo, zaudio.T) * t + self.b
-        labels = 2 * torch.eye(video_embeddings.shape[0]) - torch.ones(video_embeddings.shape[0])
-        labels = labels.cuda()
-        loss = -torch.sum(torch.nn.functional.logsigmoid(labels * logits)) / video_embeddings.shape[0]
-        return loss
-        
+
+def siglip_loss(model, video_embeddings, audio_embeddings):
+    """Sigmoid pairwise loss: every pair is an independent binary decision.
+
+    Nothing is normalised across the batch, so each pair contributes on its own --
+    which is what makes this loss tolerant of very large batches.
+    """
+    zvideo, zaudio = model(video_embeddings, audio_embeddings, normalize=True)
+    logits = torch.matmul(zvideo, zaudio.T) * torch.exp(model.t_prime) + model.b
+    n = logits.shape[0]
+    # +1 on the diagonal (the matching pair), -1 everywhere else.
+    labels = 2 * torch.eye(n, device=logits.device) - 1
+    return -torch.sum(torch.nn.functional.logsigmoid(labels * logits)) / n
+
+
+def infonce_loss(model, video_embeddings, audio_embeddings):
+    """Symmetric InfoNCE (CLIP): a softmax over each row and each column.
+
+    The two directions are averaged, so video->audio and audio->video are weighted
+    equally. `model.b` is unused: a per-logit bias cancels in a softmax.
+    """
+    zvideo, zaudio = model(video_embeddings, audio_embeddings, normalize=True)
+    logits = torch.matmul(zvideo, zaudio.T) * torch.exp(model.t_prime)
+    labels = torch.arange(logits.shape[0], device=logits.device)
+    cross_entropy = torch.nn.functional.cross_entropy
+    return 0.5 * (cross_entropy(logits, labels) + cross_entropy(logits.T, labels))
+
+
+# The training objective, selected by the `loss` config key; adding one means
+# writing a `<name>_loss(model, video_embeddings, audio_embeddings)` and
+# registering it here.
+LOSSES = {
+    "siglip": siglip_loss,
+    "infonce": infonce_loss,
+}
+
 
 @torch.no_grad()
-def evaluate(siglip, val_dataloader):
+def evaluate(model, val_dataloader):
     """Video->audio retrieval metrics, computed within each batch.
 
     Returns a dict with R@1/5/10 (fractions in [0, 1]), MRR (mean reciprocal
     rank) and MedR (median rank). All are derived from the rank of the matching
     audio for each video: rank 1 means retrieved first.
     """
-    siglip.eval()
+    model.eval()
     ranks = []
     for batch in val_dataloader:
         video_embeddings, image_embeddings, audio_embeddings = batch
         video_embeddings = video_embeddings.cuda()
         image_embeddings = image_embeddings.cuda()
-        video_embeddings = siglip.compose_video(video_embeddings, image_embeddings)
+        video_embeddings = model.compose_video(video_embeddings, image_embeddings)
         audio_embeddings = audio_embeddings.cuda()
 
-        video_embeddings, audio_embeddings = siglip(video_embeddings, audio_embeddings, normalize=True)
+        video_embeddings, audio_embeddings = model(video_embeddings, audio_embeddings, normalize=True)
         logits = torch.matmul(video_embeddings, audio_embeddings.T)
 
         # The correct audio for video i sits on the diagonal, so its rank is the
@@ -164,6 +192,7 @@ def run_training(
     n_epochs: int = 200,
     projection_dim: int = 1024,
     use_video: bool = True,
+    loss: str = "siglip",
     checkpoint_dir: str = "checkpoints",
     log_every: int = 50,
     eval_every: int = None,
@@ -173,10 +202,16 @@ def run_training(
     filter: dict = None,
     max_steps: int = None,
 ):
-    """Train the SigLIP adapters on precomputed How2 embeddings.
+    """Train the adapters on precomputed How2 embeddings.
 
     Everything is indexed by optimizer step rather than epoch, so runs with
     different `batch_size` remain comparable on the same x-axis.
+
+    `loss` names an objective in `LOSSES`. It is a training-time choice only: both
+    objectives share the same model, so a checkpoint can be evaluated without
+    knowing which one produced it. Note that `infonce` normalises over the batch
+    and `siglip` does not, which makes InfoNCE the more batch-size-sensitive of
+    the two -- comparisons between them hold at the batch size they were run at.
 
     The learning rate is not a free parameter: it is derived from `batch_size` as
     BASE_LR * sqrt(batch_size / BASE_BATCH_SIZE) (see `scale_lr`). So when
@@ -198,6 +233,10 @@ def run_training(
     makes epochs shorter, set `eval_every` explicitly when filtering, or the
     evaluation cadence -- and with it the effective patience -- shifts too.
     """
+    if loss not in LOSSES:
+        raise ValueError(f"Unknown loss `{loss}`. Available: {sorted(LOSSES)}")
+    loss_fn = LOSSES[loss]
+
     train_embeddings = os.path.join(root, "train_grouped_embeddings.pkl")
     val_embeddings = os.path.join(root, "val_grouped_embeddings.pkl")
     test_embeddings = os.path.join(root, "dev5_grouped_embeddings.pkl")
@@ -226,6 +265,7 @@ def run_training(
             "n_epochs": n_epochs,
             "projection_dim": projection_dim,
             "use_video": use_video,
+            "loss": loss,
             "lr": scale_lr(batch_size),
             "patience": patience,
             "select_metric": select_metric,
@@ -259,14 +299,14 @@ def run_training(
         num_workers=0,
     )
 
-    siglip = SigLIP(projection_dim=projection_dim, use_video=use_video)
-    siglip.cuda()
+    model = DualEncoder(projection_dim=projection_dim, use_video=use_video)
+    model.cuda()
 
     # muon_params = [
-    #     p for p in siglip.parameters() if p.ndim == 2
+    #     p for p in model.parameters() if p.ndim == 2
     # ]
     # other_params = [
-    #     p for p in siglip.parameters() if p.ndim != 2
+    #     p for p in model.parameters() if p.ndim != 2
     # ]
     # optim_muon = torch.optim.Muon(
     #     muon_params, lr=0.02, momentum=0.95
@@ -277,7 +317,7 @@ def run_training(
     # optim_muon.zero_grad()
     # optim_adamw.zero_grad()
     optimizer = torch.optim.AdamW(
-        siglip.parameters(), lr=scale_lr(batch_size), weight_decay=0.01
+        model.parameters(), lr=scale_lr(batch_size), weight_decay=0.01
     )
     optimizer.zero_grad()
 
@@ -312,8 +352,8 @@ def run_training(
     def run_evaluation(epoch: int):
         nonlocal best_val, evals_without_improvement
 
-        val_metrics = evaluate(siglip, val_dataloader)
-        test_metrics = evaluate(siglip, test_dataloader)
+        val_metrics = evaluate(model, val_dataloader)
+        test_metrics = evaluate(model, test_dataloader)
 
         if val_metrics[select_metric] > best_val:
             best_val = val_metrics[select_metric]
@@ -321,8 +361,12 @@ def run_training(
             torch.save({
                 "epoch": epoch,
                 "step": global_step,
-                "model_state_dict": siglip.state_dict(),
+                "model_state_dict": model.state_dict(),
+                # `config` is exactly the DualEncoder constructor kwargs, so it can
+                # be splatted straight back in; `loss` sits outside it because the
+                # objective is not part of the model.
                 "config": {"projection_dim": projection_dim, "use_video": use_video},
+                "loss": loss,
                 "val_r@5": val_metrics["r5"],
                 "val_r@10": val_metrics["r10"],
                 "val_accuracy": val_metrics["r1"],
@@ -346,10 +390,10 @@ def run_training(
             "test_medr": test_metrics["medr"],
         }, step=global_step)
 
-        siglip.train()
+        model.train()
 
     for epoch in tqdm(range(n_epochs_effective), total=n_epochs_effective, desc="Training"):
-        siglip.train()
+        model.train()
         for batch in dataloader:
             if global_step >= total_steps:
                 break
@@ -357,13 +401,13 @@ def run_training(
             video_embeddings, image_embeddings, audio_embeddings = batch
             video_embeddings = video_embeddings.cuda()
             image_embeddings = image_embeddings.cuda()
-            video_embeddings = siglip.compose_video(video_embeddings, image_embeddings)
+            video_embeddings = model.compose_video(video_embeddings, image_embeddings)
             audio_embeddings = audio_embeddings.cuda()
 
-            loss = siglip.loss(video_embeddings, audio_embeddings)
-            recent_losses.append(loss.item())
+            batch_loss = loss_fn(model, video_embeddings, audio_embeddings)
+            recent_losses.append(batch_loss.item())
 
-            loss.backward()
+            batch_loss.backward()
             # optim_muon.step()
             # optim_adamw.step()
             # scheduler_muon.step()
@@ -379,10 +423,12 @@ def run_training(
                 wandb.log({
                     "train_loss": sum(recent_losses) / len(recent_losses),
                     "lr": scheduler.get_last_lr()[0],
-                    # The learnable temperature and bias of the sigmoid loss are
-                    # worth watching: they drift a lot with the batch size.
-                    "temperature": torch.exp(siglip.t_prime).item(),
-                    "bias": siglip.b.item(),
+                    # The learnable temperature is worth watching: it drifts a lot
+                    # with the batch size. `bias` is logged for every run to keep
+                    # the metric schema stable, but only `siglip` uses it -- under
+                    # `infonce` it stays flat at its initial value.
+                    "temperature": torch.exp(model.t_prime).item(),
+                    "bias": model.b.item(),
                 }, step=global_step)
                 recent_losses = []
 
@@ -415,7 +461,7 @@ def main(config_name: str):
     """Run training using `configs/<config_name>.yaml`.
 
     Example:
-        uv run siglip.py default
+        uv run train.py default
     """
     cfg = load_config(config_name)
     print(f"Running config `{config_name}`:")
