@@ -208,6 +208,7 @@ def main(config_name: str, datasets=None):
     selected_metrics = ["r10", "mrr"]
     df = df[df["metric"].isin(selected_metrics)]
     df = df.pivot(index="name", columns="metric", values="value")
+    df = df.reindex(datasets)
     df = pd.DataFrame(df[selected_metrics].unstack()).T
     print(config_name)
     print(df.to_csv(index=False, float_format="%.4f"))
