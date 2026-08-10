@@ -5,8 +5,9 @@ import sys
 import numpy as np
 import torch
 
-embeddings_path = '/root/how2/embeddings/dev5'
+embeddings_path = '/mnt/private-share/speechDatabases/how2/processed_how2/embeddings/dev5/'
 embeddings = []
+outfile = "/mnt/private-share/speechDatabases/how2/processed_how2/embeddings/dev5_grouped_embeddings.pkl"
 for embedding_file in tqdm(os.listdir(embeddings_path), total=len(os.listdir(embeddings_path)), desc="Loading embeddings"):
     try:
         with open(os.path.join(embeddings_path, embedding_file), "rb") as f:
@@ -21,5 +22,5 @@ grouped_embeddings = {
     "audio_embeddings": np.array([e["audio_embedding"] for e in embeddings]),
 }
 
-with open("/root/how2/embeddings/dev5_grouped_embeddings.pkl", "wb") as f:
+with open(outfile, "wb") as f:
     pickle.dump(grouped_embeddings, f)
