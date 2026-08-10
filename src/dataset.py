@@ -25,7 +25,7 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset
 from torch.utils.data.dataloader import default_collate
 
-from utils import read_file
+from src.utils import read_file
 
 
 class Feature_DataLoader(Dataset):

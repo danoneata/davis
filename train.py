@@ -36,15 +36,16 @@ import torch as th
 import torch.optim as optim
 import wandb
 from tqdm import tqdm as std_tqdm
+from pathlib import Path
 
 tqdm = partial(std_tqdm, dynamic_ncols=True)
 
 th.backends.cudnn.benchmark = True
 
-from config import load_config
-from loss import MMS_loss, Siglip_loss
-from metrics import AverageMeter, compute_metrics, print_computed_metrics
-from utils import (
+from src.loss import MMS_loss, Siglip_loss
+from src.metrics import AverageMeter, compute_metrics, print_computed_metrics
+from src.utils import (
+    load_config,
     build_dataloader,
     build_model,
     checkpoint_filename,
@@ -52,6 +53,7 @@ from utils import (
     update_top_checkpoints,
 )
 
+CONFIGS_DIR = Path(__file__).parent / "configs"
 
 def train_one_batch(model, opt, data, loss_fun):
     video = data["video"].cuda()
@@ -384,7 +386,7 @@ def main(config_name: str = None, **overrides):
     Example:
         python train.py default
     """
-    cfg = dict(load_config(config_name)) if config_name else {}
+    cfg = dict(load_config(CONFIGS_DIR,config_name)) if config_name else {}
     cfg.update(overrides)
     
     print(f"Running training" + (f" with config `{config_name}`" if config_name else "") + ":")

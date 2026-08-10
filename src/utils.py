@@ -3,7 +3,20 @@ from __future__ import absolute_import, division, unicode_literals, print_functi
 
 from pathlib import Path
 import os
-from model import Net
+from src.model import Net
+from omegaconf import OmegaConf
+from torch.utils.data import DataLoader
+
+
+def load_config(configs_dir: Path, config_name: str) -> dict:
+    path = configs_dir / f"{config_name}.yaml"
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Config `{config_name}` not found at {path}. "
+            f"Available: {sorted(p.stem for p in configs_dir.glob('*.yaml'))}"
+        )
+    cfg = OmegaConf.load(path)
+    return cfg
 
 def read_file(path):
     """Read a text file of ids, one per line.
@@ -59,8 +72,8 @@ def build_dataloader(ids_path,
                      split):
     if not ids_path:
         return None
-    from torch.utils.data import DataLoader
-    from dataset import Feature_DataLoader
+    # Avoid circular import: import Feature_DataLoader locally
+    from src.dataset import Feature_DataLoader
 
     dataset = Feature_DataLoader(
         ids_path=ids_path,
