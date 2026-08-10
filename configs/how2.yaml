@@ -1,0 +1,8 @@
+root: /mnt/private-share/speechDatabases/how2/processed_how2/embeddings/
+batch_size: 256
+n_epochs: 50
+base_lr: 1e-3
+projection_dim: 4096
+use_video: true
+checkpoint_dir: checkpoints
+experiment_name: how2_siglip_${batch_size}_${base_lr}_${n_epochs}_${projection_dim}
