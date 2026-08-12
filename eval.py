@@ -26,54 +26,22 @@ import inspect
 import numpy as np
 import torch as th
 import wandb
+from pathlib import Path
+
 from torch.utils.data import DataLoader
 
-from config import load_config
-from dataset import Feature_DataLoader
-from model import Net
+from src.utils import (
+    load_config,
+    build_dataloader,
+    build_model,
+
+)
+
+
 
 th.backends.cudnn.benchmark = True
 
-
-def build_model(image_dim, 
-                video_feat_dim, 
-                audio_dim, 
-                embd_dim,
-                image_only):
-    if image_only:
-        video_dim = image_dim
-    else:
-        video_dim = image_dim + video_feat_dim
-    return Net(embd_dim=embd_dim, video_dim=video_dim, audio_dim=audio_dim)
-
-
-def build_dataloader(ids_path, 
-                     embeddings_path, 
-                     normalize, 
-                     image_only, 
-                     batch_size, 
-                     num_workers, 
-                     split):
-    if not ids_path:
-        return None
-    dataset = Feature_DataLoader(
-        ids_path=ids_path,
-        embeddings_path=embeddings_path,
-        split=split,
-        normalize=normalize,
-        image_only=image_only
-    )
-    print(f"{ids_path}: {len(dataset)} clips")
-    if len(dataset) == 0:
-        raise ValueError(f"No embeddings found for any id in {ids_path}.")
-    return DataLoader(
-        dataset,
-        batch_size=batch_size,
-        num_workers=num_workers,
-        shuffle=False,
-        drop_last=False,
-    )
-
+CONFIGS_DIR = Path(__file__).parent / "configs"
 
 @th.no_grad()
 def eval_retrieval(model, eval_dataloader, dataset_name,
@@ -96,6 +64,7 @@ def eval_retrieval(model, eval_dataloader, dataset_name,
 
         all_audio.append(audio_out)
         all_video.append(video_out)
+
 
     all_audio = th.cat(all_audio, dim=0)  # (N, D)
     all_video = th.cat(all_video, dim=0)  # (N, D)
@@ -168,26 +137,26 @@ def run_eval(
     net.eval()
 
     if dataset_name == "flickr8k":
-        dataloader_val = build_dataloader(None,embeddings_path, normalize, image_only, batch_size_val, num_thread_reader, split="val")
+        dataloader_val = build_dataloader(None,embeddings_path, normalize, image_only, batch_size_val, num_thread_reader, shuffle=False, drop_last=False, split="val")
         dataloader_test = build_dataloader(
-            test_ids_path, embeddings_path, normalize, image_only, batch_size_val, num_thread_reader, split="flickr8k"
+            test_ids_path, embeddings_path, normalize, image_only, batch_size_val, num_thread_reader, shuffle=False, drop_last=False, split="flickr8k"
         )
     elif dataset_name == "msr-vtt":
-        dataloader_val = build_dataloader(None,embeddings_path, normalize, image_only, batch_size_val, num_thread_reader, split="val")
+        dataloader_val = build_dataloader(None,embeddings_path, normalize, image_only, batch_size_val, num_thread_reader,shuffle=False, drop_last=False, split="val")
         dataloader_test = build_dataloader(
-            test_ids_path, embeddings_path, normalize, image_only, batch_size_val, num_thread_reader, split="msr-vtt"
+            test_ids_path, embeddings_path, normalize, image_only, batch_size_val, num_thread_reader, shuffle=False, drop_last=False, split="msr-vtt"
         )
     elif dataset_name == "youcook2":
-        dataloader_val = build_dataloader(None,embeddings_path, normalize, image_only, batch_size_val, num_thread_reader, split="val")
+        dataloader_val = build_dataloader(None,embeddings_path, normalize, image_only, batch_size_val, num_thread_reader, shuffle=False, drop_last=False, split="val")
         dataloader_test = build_dataloader(
-            test_ids_path, embeddings_path, normalize, image_only,  batch_size_val, num_thread_reader, split="youcook2"
+            test_ids_path, embeddings_path, normalize, image_only,  batch_size_val, num_thread_reader, shuffle=False, drop_last=False, split="youcook2"
         )
     else:
         dataloader_val = build_dataloader(
-            val_ids_path, embeddings_path, normalize, image_only, batch_size_val, num_thread_reader, split="val"
+            val_ids_path, embeddings_path, normalize, image_only, batch_size_val, num_thread_reader, shuffle=False, drop_last=False, split="val"
         )
         dataloader_test = build_dataloader(
-            test_ids_path, embeddings_path, normalize, image_only, batch_size_val, num_thread_reader, split="dev5"
+            test_ids_path, embeddings_path, normalize, image_only, batch_size_val, num_thread_reader, shuffle=False, drop_last=False, split="dev5"
         )
 
     if wandb_log:
@@ -243,7 +212,7 @@ def main(config_name: str = None, **overrides):
     `configs/<config_name>.yaml`. Flags for fields not present in the config
     simply add new ones.
     """
-    cfg = dict(load_config(config_name)) if config_name else {}
+    cfg = dict(load_config(CONFIGS_DIR,config_name)) if config_name else {}
     cfg.update(overrides)
 
     print(f"Running eval" + (f" with config `{config_name}`" if config_name else "") + ":")

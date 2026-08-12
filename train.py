@@ -19,7 +19,7 @@ Functional differences from the original repo's train.py:
     training progress/metrics are logged to Weights & Biases.
 
 Example:
-    python train.py default   # loads configs/default.yaml
+    python train.py default  --experiment_name=my_exp # loads configs/default.yaml + other params to override
 
 To try a new setting, copy configs/default.yaml to configs/my_run.yaml, edit it,
 then `python train.py my_run`.
