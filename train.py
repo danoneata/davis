@@ -46,6 +46,7 @@ from src.loss import MMS_loss, Siglip_loss
 from src.metrics import AverageMeter, compute_metrics, print_computed_metrics
 from src.utils import (
     load_config,
+    build_dataloader_negmine,
     build_dataloader,
     build_model,
     checkpoint_filename,
@@ -133,6 +134,7 @@ def run_training(
     image_only: bool = False,
     batch_size: int = 128,
     batch_size_val: int = 10000,
+    loss: str = "mms",
     lr: float = 1e-4,
     lr_decay: float = 1.0,
     epochs: int = 15,
@@ -176,6 +178,7 @@ def run_training(
             "normalize": normalize,
             "image_only": image_only,
             "batch_size": batch_size,
+            "loss": loss,
             "lr": lr,
             "lr_decay": lr_decay,
             "epochs": epochs,
@@ -189,9 +192,9 @@ def run_training(
         },
     )
 
-    dataloader = build_dataloader(train_ids_path, embeddings_path, normalize, image_only, batch_size, num_thread_reader, shuffle=True, drop_last=True, split="train")
-    dataloader_val = build_dataloader(val_ids_path, embeddings_path, normalize, image_only, batch_size_val, num_thread_reader, shuffle=False, drop_last=False, split="val")
-    dataloader_test = build_dataloader(test_ids_path, embeddings_path, normalize, image_only, batch_size_val, num_thread_reader, shuffle=False, drop_last=False, split="dev5")
+    dataloader = build_dataloader_negmine(train_ids_path, embeddings_path, normalize, image_only, batch_size, num_thread_reader, shuffle=True, drop_last=True, split="train_how2")
+    dataloader_val = build_dataloader_negmine(val_ids_path, embeddings_path, normalize, image_only, batch_size_val, num_thread_reader, shuffle=False, drop_last=False, split="val_how2")
+    dataloader_test = build_dataloader_negmine(test_ids_path, embeddings_path, normalize, image_only, batch_size_val, num_thread_reader, shuffle=False, drop_last=False, split="dev5_how2")
 
     net = build_model(image_dim, video_feat_dim, audio_dim, embd_dim, image_only)
 
@@ -202,8 +205,11 @@ def run_training(
     net = th.nn.DataParallel(net)
     net.train()
 
-    #loss_op = MMS_loss()
-    loss_op = Siglip_loss()
+    if loss == "mms":
+        loss_op = MMS_loss()
+    else:
+        loss_op = Siglip_loss()
+        
     loss_op.cuda()
     optimizer = optim.Adam(net.parameters(), lr=lr)
     global_step = 0
@@ -267,8 +273,13 @@ def run_training(
         if verbose:
             print("Epoch: %d" % epoch)
 
+        dataloader.batch_sampler.set_epoch(epoch)
+
         end_time = time.time()
         for i_batch, sample_batch in enumerate(tqdm(dataloader)):
+            if i_batch == 0:
+                print(sample_batch["video"][0])
+                
             data_time.update(time.time() - end_time)
 
             batch_loss = train_one_batch(net, optimizer, sample_batch, loss_op)

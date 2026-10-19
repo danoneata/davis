@@ -46,7 +46,10 @@ class Feature_DataLoader(Dataset):
                 concatenation/use, matching how the original AVLnet dataloader
                 normalizes its '2d'/'3d' video features.
         """
-        self.embeddings_path = Path(embeddings_path) / split
+        if split in ["train_how2", "val_how2", "dev5_how2"]:
+            self.embeddings_path = Path(embeddings_path) / "all" #split
+        else:
+            self.embeddings_path = Path(embeddings_path) / split
         self.normalize = normalize
         self.image_only = image_only
 

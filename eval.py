@@ -33,6 +33,7 @@ from torch.utils.data import DataLoader
 from src.utils import (
     load_config,
     build_dataloader,
+    build_dataloader_negmine,
     build_model,
 
 )
@@ -137,26 +138,26 @@ def run_eval(
     net.eval()
 
     if dataset_name == "flickr8k":
-        dataloader_val = build_dataloader(None,embeddings_path, normalize, image_only, batch_size_val, num_thread_reader, shuffle=False, drop_last=False, split="val")
-        dataloader_test = build_dataloader(
+        dataloader_val = build_dataloader_negmine(None,embeddings_path, normalize, image_only, batch_size_val, num_thread_reader, shuffle=False, drop_last=False, split="val")
+        dataloader_test = build_dataloader_negmine(
             test_ids_path, embeddings_path, normalize, image_only, batch_size_val, num_thread_reader, shuffle=False, drop_last=False, split="flickr8k"
         )
     elif dataset_name == "msr-vtt":
-        dataloader_val = build_dataloader(None,embeddings_path, normalize, image_only, batch_size_val, num_thread_reader,shuffle=False, drop_last=False, split="val")
-        dataloader_test = build_dataloader(
+        dataloader_val = build_dataloader_negmine(None,embeddings_path, normalize, image_only, batch_size_val, num_thread_reader,shuffle=False, drop_last=False, split="val")
+        dataloader_test = build_dataloader_negmine(
             test_ids_path, embeddings_path, normalize, image_only, batch_size_val, num_thread_reader, shuffle=False, drop_last=False, split="msr-vtt"
         )
     elif dataset_name == "youcook2":
-        dataloader_val = build_dataloader(None,embeddings_path, normalize, image_only, batch_size_val, num_thread_reader, shuffle=False, drop_last=False, split="val")
-        dataloader_test = build_dataloader(
+        dataloader_val = build_dataloader_negmine(None,embeddings_path, normalize, image_only, batch_size_val, num_thread_reader, shuffle=False, drop_last=False, split="val")
+        dataloader_test = build_dataloader_negmine(
             test_ids_path, embeddings_path, normalize, image_only,  batch_size_val, num_thread_reader, shuffle=False, drop_last=False, split="youcook2"
         )
     else:
-        dataloader_val = build_dataloader(
-            val_ids_path, embeddings_path, normalize, image_only, batch_size_val, num_thread_reader, shuffle=False, drop_last=False, split="val"
+        dataloader_val = build_dataloader_negmine(
+            val_ids_path, embeddings_path, normalize, image_only, batch_size_val, num_thread_reader, shuffle=False, drop_last=False, split="val_how2"
         )
-        dataloader_test = build_dataloader(
-            test_ids_path, embeddings_path, normalize, image_only, batch_size_val, num_thread_reader, shuffle=False, drop_last=False, split="dev5"
+        dataloader_test = build_dataloader_negmine(
+            test_ids_path, embeddings_path, normalize, image_only, batch_size_val, num_thread_reader, shuffle=False, drop_last=False, split="dev5_how2"
         )
 
     if wandb_log:

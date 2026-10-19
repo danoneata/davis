@@ -18,33 +18,49 @@ def load_config(configs_dir: Path, config_name: str) -> dict:
     cfg = OmegaConf.load(path)
     return cfg
 
-def read_file(path):
-    """Read a text file of ids, one per line.
+import json
+from pathlib import PurePosixPath
 
-    This is the same helper referenced by ``extract_features.py`` (used there to
-    select which videos in a raw video folder to process) and by
-    ``dataset.py`` here (used to pick which pre-extracted embeddings to load for
-    train/val/test).
 
-    Blank lines and lines starting with '#' are ignored, surrounding whitespace is
-    stripped, and duplicate ids are dropped while preserving first-seen order.
-
-    Returns:
-        A list of id strings. Membership checks (``seg_id in read_file(...)``)
-        work fine on the returned list.
+def read_file(ids_path):
     """
-    path = Path(path)
-    seen = set()
+    Read clip ids from either:
+      - a plain text file with one id per line:   1s1TPdCUvhQ_0
+      - a JSONL file with one record per line:    {"video_path": ".../-07Hlp9ZerU_0.mp4", ...}
+
+    For JSON records the id is the filename stem of video_path
+    (falling back to audio_path), e.g. "-07Hlp9ZerU_0".
+    """
     ids = []
-    with open(path, "r") as f:
-        for line in f:
-            seg_id = line.strip()
-            if not seg_id or seg_id.startswith("#"):
+    with open(ids_path, "r", encoding="utf-8") as f:
+        for line_no, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
                 continue
-            if seg_id not in seen:
-                seen.add(seg_id)
-                ids.append(seg_id)
-    return ids
+
+            if line.startswith("{"):
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError as e:
+                    raise ValueError(
+                        f"{ids_path}:{line_no}: invalid JSON line ({e})"
+                    )
+
+                path = record.get("video_path") or record.get("audio_path")
+                if not path:
+                    raise ValueError(
+                        f"{ids_path}:{line_no}: record has no "
+                        f"'video_path' or 'audio_path'"
+                    )
+                seg_id = PurePosixPath(path).stem   # strips dir + extension
+            else:
+                seg_id = line
+
+            ids.append(seg_id)
+
+    # Drop duplicates but keep the order, so a clip can't appear twice in the
+    # dataset (and the sampler can't put it in a batch twice).
+    return list(dict.fromkeys(ids))
 
 def build_model(image_dim, 
                 video_feat_dim, 
@@ -93,6 +109,96 @@ def build_dataloader(ids_path,
         drop_last=drop_last,
     )
 
+def build_dataloader_negmine(
+    ids_path,
+    embeddings_path,
+    normalize,
+    image_only,
+    batch_size,
+    num_workers,
+    shuffle,
+    drop_last,
+    split,
+):
+    if not ids_path:
+        return None
+
+    # Avoid circular import.
+    from src.dataset_negmine import (
+        Feature_DataLoader,
+        VideoGroupedBatchSampler,
+    )
+
+    dataset = Feature_DataLoader(
+        ids_path=ids_path,
+        embeddings_path=embeddings_path,
+        split=split,
+        normalize=normalize,
+        image_only=image_only,
+    )
+
+    print(f"{ids_path}: {len(dataset)} clips")
+
+    if len(dataset) == 0:
+        raise ValueError(
+            f"No embeddings found for any id in {ids_path}."
+        )
+
+    # ================================================================
+    # TRAINING
+    #
+    # We group complete videos into batches.
+    #
+    # Example with batch_size=32:
+    #
+    #   video A -> 10 clips
+    #   video B -> 8 clips
+    #   video C -> 7 clips
+    #   video D -> 12 clips
+    #
+    # batches:
+    #
+    #   A + B + C = 25
+    #   D         = 12
+    #
+    # D is NOT split between batches.
+    # ================================================================
+    if "train" in split:
+        batch_sampler = VideoGroupedBatchSampler(
+            dataset=dataset,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            drop_last=drop_last,
+        )
+
+        loader = DataLoader(
+            dataset,
+            batch_sampler=batch_sampler,
+            num_workers=num_workers,
+            pin_memory=True,
+        )
+
+        print(
+            f"[train] {len(batch_sampler)} grouped batches, "
+            f"target batch size={batch_size}"
+        )
+
+        return loader
+
+    # ================================================================
+    # VALIDATION / TEST
+    #
+    # Keep normal DataLoader behavior. Evaluation does not need the
+    # special grouped-negative sampling strategy.
+    # ================================================================
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        shuffle=shuffle,
+        drop_last=drop_last,
+        pin_memory=True,
+    )
 
 def is_better_metric(value, best, mode="max", min_delta=0.0):
     if best is None:

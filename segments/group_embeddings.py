@@ -5,9 +5,9 @@ import sys
 import numpy as np
 import torch
 
-embeddings_path = '/mnt/private-share/speechDatabases/how2/processed_how2/embeddings/dev5/'
+embeddings_path = '/mnt/private-share/speechDatabases/how2/processed_how2/embeddings/all/'
 embeddings = []
-outfile = "/mnt/private-share/speechDatabases/how2/processed_how2/embeddings/dev5_grouped_embeddings.pkl"
+outfile = "/mnt/private-share/speechDatabases/how2/processed_how2/embeddings/all_grouped_embeddings.pkl"
 for embedding_file in tqdm(os.listdir(embeddings_path), total=len(os.listdir(embeddings_path)), desc="Loading embeddings"):
     try:
         with open(os.path.join(embeddings_path, embedding_file), "rb") as f:

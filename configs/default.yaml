@@ -2,11 +2,11 @@
 #   python train.py <this_file's_name_without_.yaml>
 # e.g. `python train.py default` for this file.
 
-dataset_name: null
-embeddings_path: /mnt/private-share/speechDatabases/how2/processed_how2/embeddings
-train_ids_path: /mnt/private-share/speechDatabases/davis-gabi/how2-filtered/train.txt #/mnt/private-share/speechDatabases/how2/processed_how2/train.txt
-val_ids_path:  /mnt/private-share/speechDatabases/davis-gabi/how2-filtered/val.txt #/mnt/private-share/speechDatabases/how2/processed_how2/val.txt
-test_ids_path:  /mnt/private-share/speechDatabases/davis-gabi/how2-filtered/dev5.txt
+dataset_name: how2
+embeddings_path: /mnt/private-share/speechDatabases/how2/processed_how2/embeddings/ #/mnt/private-share/speechDatabases/how2/processed_how2/embeddings
+train_ids_path: /mnt/private-share/speechDatabases/davis-gabi/how2-spkr-sep/how2_train-final.json #/mnt/private-share/speechDatabases/how2/processed_how2/train.txt
+val_ids_path:  /mnt/private-share/speechDatabases/davis-gabi/how2-spkr-sep/how2_val-final.json #/mnt/private-share/speechDatabases/how2/processed_how2/val.txt
+test_ids_path:  /mnt/private-share/speechDatabases/davis-gabi/how2-spkr-sep/how2_dev5-final-no_filter2k.json
 
 # MODEL
 image_dim: 768        # DINOv2 image embedding dim
@@ -19,13 +19,15 @@ image_only: false
 # TRAINING PARAMS
 batch_size: 256
 batch_size_val: 100000 # big value to cover whole validation
+loss: siglip
 lr: 1e-3
 lr_decay: 1.0
-epochs: 50
+epochs: 100
 seed: 1
 num_thread_reader: 8
 pretrain_path: null
 checkpoint_dir: checkpoints
+
 
 # LOGGING
 n_display: 150
@@ -41,7 +43,7 @@ early_stopping: false
 early_stopping_patience: 10
 early_stopping_min_delta: 0.0
 
-wandb_project: avlnet-gabi
+wandb_project: avlnet-spkr-separated
 # ${} interpolation pulls values from elsewhere in this same file, same as OmegaConf
 # does in the reference script.
-experiment_name: wtf_test #how2-train_both75-val_lm25-dev5_lm25_${batch_size}_${lr}_${epochs}_${embd_dim}
+experiment_name: train-16457_${batch_size}_${lr}_${epochs}_${embd_dim}_${loss}
