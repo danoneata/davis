@@ -336,27 +336,50 @@ Outputs:
 ## Evaluation
 
 ```bash
-uv run evaluate.py <config_name> [--datasets a,b,c]
+uv run evaluate.py <config_name> [--datasets a,b,c] [--direction v2a|a2v|both]
 ```
 
-Reports R@10 and MRR (video→audio retrieval, ranked within a single batch that
-holds the whole pool). Dataset names are either a How2 split
-(`how2-train`/`how2-val`/`how2-dev5`) or a key of `extract_features.DATASETS`;
-the default set is `how2-dev5,msr-vtt,youcook2`.
+Reports R@10 and MRR, ranked against the whole pool. Dataset names are either a
+How2 split (`how2-train`/`how2-val`/`how2-dev5`) or a key of
+`extract_features.DATASETS`; the default set is `how2-dev5,msr-vtt,youcook2`.
 
-Image datasets carry several spoken captions per image. Rather than picking one
-caption or stuffing all five into the same pool (which would put five copies of
-each image in the gallery and make the diagonal ambiguous), the evaluation runs
-one full retrieval per caption index and averages the metrics — so all 5,000
-Flickr8k captions are used, each in a clean 1,000-way task.
+`--direction` picks which side asks the questions: `v2a` (the default, and what
+training reports), `a2v`, or `both`. With a single direction the CSV keeps its
+two-level metric/dataset header; `both` adds a third header row for the
+direction.
+
+Image datasets carry several spoken captions per image, and the two directions
+are then genuinely different problems rather than transposes:
+
+- `v2a` — 1,000 Flickr8k images queried against all 5,000 clips, with **all
+  five** captions of the query image counting as correct. The reported rank is
+  that of the best-scoring correct caption.
+- `a2v` — each of the 5,000 clips queried against the 1,000 images, one correct
+  answer each.
+
+This is the pooled protocol Flickr8k numbers are normally reported under. It
+replaced an earlier scheme that ran one 1,000-way retrieval per caption index
+and averaged the five, so flickr8k numbers recorded before that change are not
+comparable.
+
+`retrieval.py` holds the scoring itself — `build_problem` (which gallery items
+count as correct, per direction) and `score_problem` (rank of the best-scoring
+positive). `show_results.py` scores through the same functions, so the viewer's
+R@K and the table agree exactly.
 
 They also have no video track, so evaluating a `use_video: true` checkpoint on
 them is rejected with an explicit error; use a `use_video: false` config such as
 `run-01-novideo`.
 
 ```bash
-uv run evaluate.py run-01-novideo --datasets flickr8k
+uv run evaluate.py run-01-novideo --datasets flickr8k --direction both
 ```
+
+One caveat on the How2 splits: ranking is now against the whole pool, where it
+used to be against 5,000-row chunks. Only `how2-train` (~185k segments) is large
+enough for that to have mattered, and its numbers drop accordingly — the earlier
+ones were flattered by the smaller effective gallery. `how2-val`, `how2-dev5`,
+`msr-vtt` and `youcook2` all fit in one chunk and are unchanged.
 
 ## Qualitative retrieval viewer
 
@@ -393,14 +416,14 @@ instead of results.
 
 The **Caption** control decides how the five captions per image are used:
 
-- A single index gives a clean 1,000-way task and reproduces exactly one of the
-  trials `evaluate.py` averages — the viewer's R@10 for caption `c` equals that
-  trial's, and the mean over the five equals the reported number.
-- `all` uses every caption at once: `audio→image` runs 5,000 queries against the
-  1,000-image gallery (one correct answer each), and `image→audio` runs 1,000
-  queries against a 5,000-clip gallery where **all five** captions of the query
-  image count as correct. The reported ground-truth rank is the rank of the
-  best-scoring correct answer, and every correct clip is marked ✅ in the results.
+- `all` uses every caption at once, which is exactly what `evaluate.py` scores:
+  `audio→image` runs 5,000 queries against the 1,000-image gallery (one correct
+  answer each), and `image→audio` runs 1,000 queries against a 5,000-clip gallery
+  where **all five** captions of the query image count as correct. The viewer's
+  R@10 at pool `full` equals the reported number for the matching direction.
+- A single index narrows the pool to one caption per image, giving a clean
+  1,000-way task in both directions. Useful for isolating a caption, but not a
+  number `evaluate.py` reports.
 
 ## Alignment-scores viewer
 

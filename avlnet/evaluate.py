@@ -8,7 +8,14 @@ from tqdm import tqdm
 import pandas as pd
 
 from extract_features import DATASETS
-from train import DualEncoder, evaluate, load_config
+from retrieval import (
+    DIRECTIONS,
+    V2A,
+    build_problem,
+    metrics_from_ranks,
+    score_problem,
+)
+from train import DualEncoder, load_config
 
 
 HOW2_SPLITS = {
@@ -17,17 +24,8 @@ HOW2_SPLITS = {
     "how2-dev5": "dev5",
 }
 DEFAULT_DATASETS = ("how2-dev5", "msr-vtt", "youcook2")
-
-
-class _ArrayDataset(torch.utils.data.Dataset):
-    def __init__(self, video, image, audio):
-        self.video, self.image, self.audio = video, image, audio
-
-    def __len__(self):
-        return len(self.video)
-
-    def __getitem__(self, idx):
-        return self.video[idx], self.image[idx], self.audio[idx]
+# Rows pushed through the adapters per forward pass.
+ENCODE_CHUNK = 4096
 
 
 def _load_how2_split(root: str, split: str):
@@ -81,11 +79,10 @@ def _load_external_dataset(name: str):
 def _load_image_dataset(name: str):
     """Load the per-image embeddings written by `extract_features.py <name>`.
 
-    These datasets pair a still image with several spoken captions, so they yield
-    one trial per caption index rather than a single one. Each trial is a complete
-    retrieval task over all images, using that caption's audio; the metrics are
-    then averaged over trials, which uses every caption without ever putting two
-    copies of the same image into the same gallery.
+    These datasets pair a still image with several spoken captions, so the audio side
+    is longer than the visual one: the clips are flattened into a single gallery and
+    `audio_to_visual` records which image each belongs to. Every caption is then a
+    correct answer for its image, rather than one caption being picked arbitrarily.
 
     There is no video track, so the video array is zero-width: `use_video=False`
     models ignore it, and `use_video=True` models are rejected up front.
@@ -111,28 +108,73 @@ def _load_image_dataset(name: str):
     image = np.stack(image).astype(np.float32)
     audio = np.stack(audio).astype(np.float32)  # (n, n_captions, dim)
     video = np.zeros((len(image), 0), dtype=np.float32)
-    return [(video, image, audio[:, i]) for i in range(audio.shape[1])]
+    n, n_captions = audio.shape[:2]
+    return {
+        "video": video,
+        "image": image,
+        "audio": audio.reshape(n * n_captions, audio.shape[-1]),
+        "audio_to_visual": np.repeat(np.arange(n), n_captions),
+    }
 
 
-def _load_dataset(name: str, cfg: dict):
-    """Return a list of (video, image, audio) trials for `name`.
+def _load_dataset(name: str, cfg: dict) -> dict:
+    """Return the retrieval pool for `name`: {video, image, audio, audio_to_visual}.
 
-    Most datasets have exactly one trial; see `_load_image_dataset` for the
-    multi-caption case.
+    Video datasets pair one clip with one visual item, so `audio_to_visual` is the
+    identity; see `_load_image_dataset` for the multi-caption case.
     """
     if name in HOW2_SPLITS:
-        return [_load_how2_split(cfg["root"], HOW2_SPLITS[name])]
-    if name in DATASETS:
+        arrays = _load_how2_split(cfg["root"], HOW2_SPLITS[name])
+    elif name in DATASETS:
         if DATASETS[name].get("kind", "video") == "image":
             return _load_image_dataset(name)
-        return [_load_external_dataset(name)]
-    raise ValueError(
-        f"Unknown dataset `{name}`. Available: "
-        f"how2 splits {list(HOW2_SPLITS)} or external {sorted(DATASETS)}."
-    )
+        arrays = _load_external_dataset(name)
+    else:
+        raise ValueError(
+            f"Unknown dataset `{name}`. Available: "
+            f"how2 splits {list(HOW2_SPLITS)} or external {sorted(DATASETS)}."
+        )
+    video, image, audio = arrays
+    return {
+        "video": video,
+        "image": image,
+        "audio": audio,
+        "audio_to_visual": np.arange(len(image)),
+    }
 
 
-def main(config_name: str, datasets=None):
+@torch.no_grad()
+def _encode_pool(model, pool: dict, device) -> dict:
+    """Project a pool into the joint space, L2-normalised and chunked.
+
+    The two sides are encoded separately because they no longer have the same length
+    on multi-caption datasets. This inlines what `DualEncoder.forward` does to each
+    side (train.py) rather than calling it, since forward takes the two together.
+    """
+    normalize = torch.nn.functional.normalize
+    video = torch.from_numpy(pool["video"])
+    image = torch.from_numpy(pool["image"])
+    audio = torch.from_numpy(pool["audio"])
+
+    zvisual = []
+    for start in range(0, len(image), ENCODE_CHUNK):
+        sl = slice(start, start + ENCODE_CHUNK)
+        visual = model.compose_video(video[sl].to(device), image[sl].to(device))
+        zvisual.append(normalize(model.video_adapter(visual), p=2, dim=1).cpu())
+
+    zaudio = []
+    for start in range(0, len(audio), ENCODE_CHUNK):
+        chunk = audio[start : start + ENCODE_CHUNK].to(device)
+        zaudio.append(normalize(model.audio_adapter(chunk), p=2, dim=1).cpu())
+
+    return {
+        "zvisual": torch.cat(zvisual),
+        "zaudio": torch.cat(zaudio),
+        "audio_to_visual": pool["audio_to_visual"],
+    }
+
+
+def main(config_name: str, datasets=None, direction: str = V2A):
     """Evaluate the best checkpoint for `config_name` on one or more datasets.
 
     By default, reports R@1/5/10, MRR and median rank on: how2-dev5 (How2 test),
@@ -142,13 +184,16 @@ def main(config_name: str, datasets=None):
         uv run evaluate.py default
         uv run evaluate.py default --datasets msr-vtt,youcook2
         uv run evaluate.py default --datasets how2-val,how2-dev5
-        uv run evaluate.py run-01-novideo --datasets flickr8k
+        uv run evaluate.py run-01-novideo --datasets flickr8k --direction both
 
     `datasets` may be a comma-separated string or a list. Each name is either
     a How2 split (how2-train/how2-val/how2-dev5) or a key of extract_features.DATASETS.
 
-    Image datasets such as flickr8k have several spoken captions per image; their
-    metrics are averaged over one retrieval run per caption index.
+    `direction` is `v2a` (visual queries, audio gallery -- the default and what
+    training reports), `a2v`, or `both`. The two are not transposes of each other on
+    image datasets: `v2a` queries 1,000 Flickr8k images against all 5,000 clips with
+    all five captions of the query image counting as correct, while `a2v` queries each
+    of the 5,000 clips against the 1,000 images with a single correct answer.
     """
     if datasets is None:
         datasets = list(DEFAULT_DATASETS)
@@ -156,6 +201,15 @@ def main(config_name: str, datasets=None):
         datasets = [s.strip() for s in datasets.split(",") if s.strip()]
     else:
         datasets = list(datasets)
+
+    if direction == "both":
+        directions = list(DIRECTIONS)
+    elif direction in DIRECTIONS:
+        directions = [direction]
+    else:
+        raise ValueError(
+            f"Unknown direction `{direction}`. Available: {[*DIRECTIONS, 'both']}."
+        )
 
     cfg = load_config(config_name)
     checkpoint_dir = cfg.get("checkpoint_dir", "checkpoints")
@@ -181,40 +235,43 @@ def main(config_name: str, datasets=None):
                 f"on it instead (e.g. run-01-novideo)."
             )
 
-        trials = _load_dataset(name, cfg)
-        metrics = []
-        for video, image, audio in trials:
-            dataset = _ArrayDataset(
-                torch.from_numpy(video),
-                torch.from_numpy(image),
-                torch.from_numpy(audio),
+        # Encoded once and scored per direction: the projections do not depend on
+        # which side asks the questions.
+        encoded = _encode_pool(model, _load_dataset(name, cfg), device)
+        for direction in directions:
+            problem = build_problem(encoded, direction)
+            preds = score_problem(
+                problem, device=device, desc=f"Scoring {name} {direction}"
             )
-            dataloader = torch.utils.data.DataLoader(
-                dataset,
-                batch_size=5000,
-                shuffle=False,
-                num_workers=0,
-            )
-            metrics.append(evaluate(model, dataloader))
+            for metric_name, value in metrics_from_ranks(preds["gt_rank"]).items():
+                if metric_name in {"r1", "r5", "r10"}:
+                    value = 100 * value
+                yield {
+                    "name": name,
+                    "direction": direction,
+                    "metric": metric_name,
+                    "value": value,
+                }
 
-        for metric_name in metrics[0]:
-            metric_value = np.mean([m[metric_name] for m in metrics])
-            if metric_name in {"r1", "r5", "r10"}:
-                metric_value = 100 * metric_value
-            yield {
-                "name": name,
-                "metric": metric_name,
-                "value": metric_value,
-            }
-
-    results = [r for name in datasets for r in get_result(name)]
-    df = pd.DataFrame(results)
+    results = {
+        (r["metric"], r["name"], r["direction"]): r["value"]
+        for name in datasets
+        for r in get_result(name)
+    }
 
     selected_metrics = ["r10", "mrr"]
-    df = df[df["metric"].isin(selected_metrics)]
-    df = df.pivot(index="name", columns="metric", values="value")
-    df = df.reindex(datasets)
-    df = pd.DataFrame(df[selected_metrics].unstack()).T
+    keys = [
+        (metric, name, d)
+        for metric in selected_metrics
+        for name in datasets
+        for d in directions
+    ]
+    # With a single direction the header stays the two-level metric/dataset one that
+    # these tables have always had, so old and new output line up column for column.
+    columns = pd.MultiIndex.from_tuples(
+        keys if len(directions) > 1 else [k[:2] for k in keys]
+    )
+    df = pd.DataFrame([[results[k] for k in keys]], columns=columns)
     print(config_name)
     print(df.to_csv(index=False, float_format="%.4f"))
 

@@ -10,6 +10,7 @@ from tqdm import tqdm
 
 from evaluate import HOW2_SPLITS
 from extract_features import DATASETS, list_videos, read_wav2capt
+from retrieval import A2V, AUDIO, V2A, VISUAL, build_problem, score_problem
 from train import DualEncoder
 from utils import read_file
 
@@ -20,10 +21,8 @@ DEFAULT_CHECKPOINT = Path(__file__).parent / "checkpoints" / "run-00" / "best.pt
 # How2 splits plus the external evaluation datasets registered in extract_features.
 DATASETS_ALL = ["how2-val", "how2-dev5", "how2-train", *sorted(DATASETS)]
 MAX_TOPK = 20
-BATCH_SIZE = 256
-# The two sides of a retrieval pair. "visual" is a video for video datasets and a
-# still image for image datasets; it is the side `DualEncoder.video_adapter` encodes.
-VISUAL, AUDIO = "visual", "audio"
+# The sidebar labels, mapped to the direction codes `retrieval.build_problem` takes.
+DIRECTION_CODES = {"audio→video": A2V, "video→audio": V2A}
 
 
 def dataset_kind(dataset: str) -> str:
@@ -234,45 +233,6 @@ def encode_pool(
     }
 
 
-def group_by_visual(audio_to_visual: np.ndarray, n_visual: int) -> np.ndarray:
-    """Invert `audio_to_visual` into an (n_visual, n_captions) array of audio indices.
-
-    Every visual item is assumed to have the same number of audio clips, which holds
-    for both the identity mapping and Flickr8k's fixed five captions per image.
-    """
-    counts = np.bincount(audio_to_visual, minlength=n_visual)
-    if not (counts == counts[0]).all():
-        raise ValueError("Uneven number of audio clips per visual item.")
-    order = np.argsort(audio_to_visual, kind="stable")
-    return order.reshape(n_visual, counts[0])
-
-
-def build_problem(encoded: dict, direction: str) -> dict:
-    """Turn an encoded pool into a directed retrieval problem.
-
-    `positives` holds, for every query, the gallery indices that count as correct: one
-    per query except for image→audio on a multi-caption dataset, where every caption of
-    the query image is a correct answer.
-    """
-    audio_to_visual = encoded["audio_to_visual"]
-    n_visual = len(encoded["visual_ids"])
-    if direction == "audio→video":
-        query, gallery, query_kind = AUDIO, VISUAL, AUDIO
-        positives = audio_to_visual[:, None]
-    else:
-        query, gallery, query_kind = VISUAL, AUDIO, VISUAL
-        positives = group_by_visual(audio_to_visual, n_visual)
-    return {
-        "query_ids": encoded[f"{query}_ids"],
-        "gallery_ids": encoded[f"{gallery}_ids"],
-        "zquery": encoded[f"z{query}"],
-        "zgallery": encoded[f"z{gallery}"],
-        "positives": positives.astype(np.int64),
-        "query_kind": query_kind,
-        "gallery_kind": AUDIO if query_kind == VISUAL else VISUAL,
-    }
-
-
 @st.cache_resource(show_spinner=False)
 def video_index(dataset: str) -> dict:
     """Map segment id → video file for datasets whose extensions vary."""
@@ -470,37 +430,10 @@ def precompute_predictions(
             return pickle.load(f)
 
     problem = build_problem(
-        encode_pool(dataset, checkpoint_path, pool_size, seed, caption), direction
+        encode_pool(dataset, checkpoint_path, pool_size, seed, caption),
+        DIRECTION_CODES[direction],
     )
-    query_mat, gallery = problem["zquery"], problem["zgallery"]
-
-    n = query_mat.shape[0]
-    k = min(MAX_TOPK, gallery.shape[0])
-    topk_idx = np.zeros((n, k), dtype=np.int64)
-    topk_score = np.zeros((n, k), dtype=np.float32)
-    gt_rank = np.zeros(n, dtype=np.int64)
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    gallery = gallery.to(device)
-    query_mat = query_mat.to(device)
-    positives = torch.from_numpy(problem["positives"]).to(device)
-
-    with torch.no_grad():
-        for start in tqdm(range(0, n, BATCH_SIZE), desc=f"Scoring {direction}"):
-            end = min(start + BATCH_SIZE, n)
-            scores = query_mat[start:end] @ gallery.T  # (b, n_gallery)
-            vals, idx = torch.topk(scores, k=k, dim=1)
-            topk_idx[start:end] = idx.cpu().numpy()
-            topk_score[start:end] = vals.cpu().numpy()
-
-            # Rank of the best correct answer: the number of gallery items scoring
-            # strictly higher than it, plus one.
-            best = scores.gather(1, positives[start:end]).max(dim=1).values
-            gt_rank[start:end] = (
-                ((scores > best.unsqueeze(1)).sum(dim=1) + 1).cpu().numpy()
-            )
-
-    preds = {"topk_idx": topk_idx, "topk_score": topk_score, "gt_rank": gt_rank}
+    preds = score_problem(problem, topk=MAX_TOPK, desc=f"Scoring {direction}")
     CACHE_ROOT.mkdir(parents=True, exist_ok=True)
     with open(disk_path, "wb") as f:
         pickle.dump(preds, f)
@@ -585,8 +518,8 @@ def main():
                     f"all {n_captions} captions" if c == "all" else f"caption #{c}"
                 ),
                 help=(
-                    "A single caption index reproduces one of the trials that "
-                    "`evaluate.py` averages over; `all` uses every caption at once."
+                    "`all` uses every caption at once and is what `evaluate.py` "
+                    "scores; a single index narrows the pool to one caption per image."
                 ),
             )
 
@@ -634,7 +567,7 @@ def main():
 
     problem = build_problem(
         encode_pool(dataset, checkpoint_path, int(pool_size), int(seed), caption),
-        direction,
+        DIRECTION_CODES[direction],
     )
     preds = precompute_predictions(
         dataset, checkpoint_path, int(pool_size), int(seed), direction, caption
