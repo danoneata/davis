@@ -10,8 +10,8 @@ import math
 import yaml
 from pathlib import Path
 
-from filtering import select_indices
-from how2_splits import filelist_path, load_split, load_split_ids
+from filtering import evaluate_predicate, select_indices
+from how2_splits import filelist_path, load_split, load_split_ids, read_records
 
 
 CONFIGS_DIR = Path(__file__).parent / "configs"
@@ -30,22 +30,77 @@ def load_config(config_name: str) -> dict:
 
 
 class Dataset(torch.utils.data.Dataset):
-    def __init__(self, embeddings: dict, indices=None):
-        """`indices` restricts the dataset to a subset of rows; None uses all of them."""
+    def __init__(self, embeddings: dict, indices=None, positive=None):
+        """`indices` restricts the dataset to a subset of rows; None uses all of them.
+
+        `positive[k]` says whether item `k` (a position in the dataset, not a row)
+        may be used as a positive pair; None means every item may.
+        """
         self.embeddings = embeddings
         n = len(self.embeddings["video_embeddings"])
         self.indices = np.arange(n) if indices is None else np.asarray(indices)
+        self.positive = (
+            np.ones(len(self.indices), dtype=bool) if positive is None else np.asarray(positive)
+        )
+        assert len(self.positive) == len(self.indices)
 
     def __getitem__(self, idx):
         i = self.indices[idx]
         return (
             self.embeddings["video_embeddings"][i],
             self.embeddings["image_embeddings"][i],
-            self.embeddings["audio_embeddings"][i]
+            self.embeddings["audio_embeddings"][i],
+            self.positive[idx],
         )
 
     def __len__(self):
         return len(self.indices)
+
+
+class PositivesWithNegativesSampler(torch.utils.data.Sampler):
+    """Batches of `batch_size` positive items plus `extra_negatives` other items.
+
+    An epoch is one shuffled pass over the positives (the tail is dropped); the extra
+    items are drawn at random from the non-positives and serve only as negatives. This
+    keeps the number of positive pairs per step equal to a run that trains on the
+    positives alone, so the two differ only in the added negatives.
+    """
+
+    def __init__(self, positive: np.ndarray, batch_size: int, extra_negatives: int, seed: int = 0):
+        self.positives = np.flatnonzero(positive)
+        self.negatives = np.flatnonzero(~positive)
+        self.batch_size = batch_size
+        self.extra_negatives = extra_negatives
+        self.rng = np.random.default_rng(seed)
+        if len(self.positives) < batch_size:
+            raise ValueError(
+                f"{len(self.positives)} positives, fewer than batch_size={batch_size}."
+            )
+        if extra_negatives > len(self.negatives):
+            raise ValueError(
+                f"extra_negatives={extra_negatives} but only {len(self.negatives)} "
+                f"non-positive segments."
+            )
+
+    def __iter__(self):
+        order = self.rng.permutation(self.positives)
+        for b in range(len(self)):
+            batch = order[b * self.batch_size : (b + 1) * self.batch_size]
+            if self.extra_negatives:
+                extra = self.rng.choice(self.negatives, size=self.extra_negatives, replace=False)
+                batch = np.concatenate([batch, extra])
+            yield batch.tolist()
+
+    def __len__(self):
+        return len(self.positives) // self.batch_size
+
+
+def select_positives(spec: dict, ids: list[str], split_tag: str) -> np.ndarray:
+    """Which of `ids` may be positive pairs, by `spec["predicate"]` on their records."""
+    if split_tag is None:
+        raise ValueError("`positive_filter` needs `split_tag`: it reads the filelist scores.")
+    records = read_records("train", split_tag)
+    return np.array([evaluate_predicate(spec["predicate"], records[i]) for i in ids])
 
 
 class Adapter(torch.nn.Module):
@@ -112,36 +167,55 @@ class DualEncoder(torch.nn.Module):
         return video_embeddings, audio_embeddings
 
 
-def siglip_loss(model, video_embeddings, audio_embeddings):
+def siglip_loss(model, video_embeddings, audio_embeddings, positive=None):
     """Sigmoid pairwise loss: every pair is an independent binary decision.
 
     Nothing is normalised across the batch, so each pair contributes on its own --
     which is what makes this loss tolerant of very large batches.
+
+    `positive` (bool, one per item) drops the matching-pair term of the items that are
+    False; their pairings with other items still count as negatives. The sum is
+    normalised by the number of positives, so all-True reproduces the plain loss.
     """
     zvideo, zaudio = model(video_embeddings, audio_embeddings, normalize=True)
     logits = torch.matmul(zvideo, zaudio.T) * torch.exp(model.t_prime) + model.b
     n = logits.shape[0]
+    eye = torch.eye(n, device=logits.device)
     # +1 on the diagonal (the matching pair), -1 everywhere else.
-    labels = 2 * torch.eye(n, device=logits.device) - 1
-    return -torch.sum(torch.nn.functional.logsigmoid(labels * logits)) / n
+    labels = 2 * eye - 1
+    terms = torch.nn.functional.logsigmoid(labels * logits)
+    if positive is None:
+        return -torch.sum(terms) / n
+    positive = positive.to(logits.device, dtype=logits.dtype)
+    weights = 1 - eye + torch.diag(positive)
+    return -torch.sum(weights * terms) / positive.sum().clamp(min=1)
 
 
-def infonce_loss(model, video_embeddings, audio_embeddings):
+def infonce_loss(model, video_embeddings, audio_embeddings, positive=None):
     """Symmetric InfoNCE (CLIP): a softmax over each row and each column.
 
     The two directions are averaged, so video->audio and audio->video are weighted
     equally. `model.b` is unused: a per-logit bias cancels in a softmax.
+
+    `positive` (bool, one per item) keeps only the rows and columns of the True items
+    as queries; the others stay in every softmax denominator, as negatives.
     """
     zvideo, zaudio = model(video_embeddings, audio_embeddings, normalize=True)
     logits = torch.matmul(zvideo, zaudio.T) * torch.exp(model.t_prime)
     labels = torch.arange(logits.shape[0], device=logits.device)
     cross_entropy = torch.nn.functional.cross_entropy
-    return 0.5 * (cross_entropy(logits, labels) + cross_entropy(logits.T, labels))
+    if positive is None:
+        return 0.5 * (cross_entropy(logits, labels) + cross_entropy(logits.T, labels))
+    positive = positive.to(logits.device, dtype=logits.dtype)
+    per_item = cross_entropy(logits, labels, reduction="none") + cross_entropy(
+        logits.T, labels, reduction="none"
+    )
+    return 0.5 * torch.sum(positive * per_item) / positive.sum().clamp(min=1)
 
 
 # The training objective, selected by the `loss` config key; adding one means
-# writing a `<name>_loss(model, video_embeddings, audio_embeddings)` and
-# registering it here.
+# writing a `<name>_loss(model, video_embeddings, audio_embeddings, positive=None)`
+# and registering it here (`positive` comes from `positive_filter`).
 LOSSES = {
     "siglip": siglip_loss,
     "infonce": infonce_loss,
@@ -159,7 +233,7 @@ def evaluate(model, val_dataloader):
     model.eval()
     ranks = []
     for batch in val_dataloader:
-        video_embeddings, image_embeddings, audio_embeddings = batch
+        video_embeddings, image_embeddings, audio_embeddings = batch[:3]
         video_embeddings = video_embeddings.cuda()
         image_embeddings = image_embeddings.cuda()
         video_embeddings = model.compose_video(video_embeddings, image_embeddings)
@@ -200,6 +274,7 @@ def run_training(
     filter: dict = None,
     max_steps: int = None,
     split_tag: str = None,
+    positive_filter: dict = None,
 ):
     """Train the adapters on precomputed How2 embeddings.
 
@@ -235,6 +310,11 @@ def run_training(
     `split_tag` trains, validates and tests on the filelists
     `data/filelists/how2_{train,val,dev5}-<split_tag>.json` instead of the original
     How2 splits (see `how2_splits.py`).
+
+    `positive_filter` (`{predicate, extra_negatives}`, needs `split_tag`) uses only the
+    training segments whose filelist record satisfies `predicate` as positive pairs.
+    Each batch is `batch_size` of them plus `extra_negatives` of the rest, which count
+    only as negatives (see `PositivesWithNegativesSampler`).
     """
     if loss not in LOSSES:
         raise ValueError(f"Unknown loss `{loss}`. Available: {sorted(LOSSES)}")
@@ -257,7 +337,17 @@ def run_training(
             min_size=batch_size if drop_last else 1,
         )
 
-    dataset = Dataset(load_split(root, "train", split_tag), indices=train_indices)
+    positive = None
+    if positive_filter is not None:
+        train_ids = load_split_ids(root, "train", split_tag)
+        if train_indices is not None:
+            train_ids = [train_ids[i] for i in train_indices]
+        positive = select_positives(positive_filter, train_ids, split_tag)
+        print(f"Positive filter: {positive.sum()} of {len(positive)} segments are positives.")
+
+    dataset = Dataset(
+        load_split(root, "train", split_tag), indices=train_indices, positive=positive
+    )
 
     wandb.init(
         project="avlnet",
@@ -277,18 +367,29 @@ def run_training(
             "filter": filter,
             "n_train": len(dataset),
             "max_steps": max_steps,
+            "positive_filter": positive_filter,
+            "n_positive": int(dataset.positive.sum()),
         }
     )
 
-    dataloader = torch.utils.data.DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=0,
-        # A short tail batch is a much easier contrastive task (fewer negatives),
-        # so it would inject noise into the loss curve at large batch sizes.
-        drop_last=drop_last,
-    )
+    if positive_filter is None:
+        dataloader = torch.utils.data.DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=0,
+            # A short tail batch is a much easier contrastive task (fewer negatives),
+            # so it would inject noise into the loss curve at large batch sizes.
+            drop_last=drop_last,
+        )
+    else:
+        dataloader = torch.utils.data.DataLoader(
+            dataset,
+            batch_sampler=PositivesWithNegativesSampler(
+                dataset.positive, batch_size, positive_filter.get("extra_negatives", 0)
+            ),
+            num_workers=0,
+        )
     val_dataset = Dataset(load_split(root, "val", split_tag))
     val_dataloader = torch.utils.data.DataLoader(
         val_dataset,
@@ -403,13 +504,18 @@ def run_training(
             if global_step >= total_steps:
                 break
 
-            video_embeddings, image_embeddings, audio_embeddings = batch
+            video_embeddings, image_embeddings, audio_embeddings, positive = batch
             video_embeddings = video_embeddings.cuda()
             image_embeddings = image_embeddings.cuda()
             video_embeddings = model.compose_video(video_embeddings, image_embeddings)
             audio_embeddings = audio_embeddings.cuda()
 
-            batch_loss = loss_fn(model, video_embeddings, audio_embeddings)
+            batch_loss = loss_fn(
+                model,
+                video_embeddings,
+                audio_embeddings,
+                positive=None if positive_filter is None else positive,
+            )
             recent_losses.append(batch_loss.item())
 
             batch_loss.backward()

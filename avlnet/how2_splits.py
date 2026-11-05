@@ -41,24 +41,32 @@ def filelist_path(split: str, tag: str) -> Path:
 
 
 @lru_cache(maxsize=None)
-def read_filelist(split: str, tag: str) -> dict[str, str]:
-    """Segment id -> the original split holding it, in filelist order."""
+def read_records(split: str, tag: str) -> dict[str, dict]:
+    """Segment id -> its filelist record (scores, text, speaker...), in filelist order."""
     path = filelist_path(split, tag)
     if not path.exists():
         raise FileNotFoundError(f"Filelist not found: {path}")
 
-    segments = {}
+    records = {}
     with open(path) as f:
         for line in f:
             if not line.strip():
                 continue
-            video_path = json.loads(line)["video_path"]
-            match = _VIDEO_PATH.fullmatch(video_path)
+            record = json.loads(line)
+            match = _VIDEO_PATH.fullmatch(record["video_path"])
             if match is None:
-                raise ValueError(f"Unexpected video_path `{video_path}` in {path}.")
-            source, segment_id = match.groups()
-            segments[segment_id] = source
-    return segments
+                raise ValueError(f"Unexpected video_path `{record['video_path']}` in {path}.")
+            records[match.group(2)] = record
+    return records
+
+
+@lru_cache(maxsize=None)
+def read_filelist(split: str, tag: str) -> dict[str, str]:
+    """Segment id -> the original split holding it, in filelist order."""
+    return {
+        segment_id: _VIDEO_PATH.fullmatch(record["video_path"]).group(1)
+        for segment_id, record in read_records(split, tag).items()
+    }
 
 
 def load_grouped(root: str, split: str) -> dict:

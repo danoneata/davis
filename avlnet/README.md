@@ -303,9 +303,46 @@ pickles through the sidecars of **all three**; run `make_grouped_ids.py` for `tr
 > test split matching the config's `split_tag` and warns on any crossed How2 dataset;
 > treat a crossed number as contaminated.
 
+The tagged val and dev5 folds are themselves filtered to `lm_score >= 8`, while train
+is not (41.6% of it passes). For an unfiltered test fold, use
+`how2-dev5-final-no_filter2k`: 2,000 segments from the same speaker-separated pool,
+with the train distribution of `lm_score`, and no speakers shared with train or val.
+
 `filter` applies on top of the tagged train split. Note that
 `how2-train-alignment-scores.jsonl` covers the original train only, so `from_list`
 with it drops the tagged segments from the original val and dev5.
+
+### Choosing positives (`positive_filter`)
+
+`filter` removes segments entirely. `positive_filter` instead only stops them from
+being *positive pairs*: a poorly aligned clip's own (video, audio) pair is a wrong
+positive, but paired with any other clip it is still a valid negative.
+
+```yaml
+split_tag: final          # required: the predicate reads the filelist records
+positive_filter:
+  predicate: {field: lm_score, op: ">=", value: 8}   # same grammar as `filter`
+  extra_negatives: 128
+```
+
+Each batch is `batch_size` segments passing the predicate plus `extra_negatives`
+drawn at random from the rest, and an epoch is one pass over the passing segments.
+The number of positive pairs per step therefore matches a run that `filter`s on the
+same predicate, so the two differ only in the added negatives. Each loss drops the
+matching-pair term of the negative-only items: `siglip` zeroes their diagonal
+weight and normalises by the number of positives; `infonce` keeps only the
+positive rows and columns as queries, with the rest left in every denominator. When
+every item is positive, both are exactly the plain losses.
+
+The `run-06` configs compare the options at a fixed 144,400-step budget, with no
+early stopping (`patience: 0`):
+
+| Config             | Training signal                                                |
+| ------------------ | -------------------------------------------------------------- |
+| `run-06-all`       | every segment                                                  |
+| `run-06-lm8`       | only `lm_score >= 8` (63,261 segments)                         |
+| `run-06-random63k` | random 63,261 segments (size control for `run-06-lm8`)         |
+| `run-06-lm8-negs`  | `lm_score >= 8` as positives, plus 128 others per batch as negatives |
 
 ### Training budget (`max_steps`)
 

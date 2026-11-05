@@ -39,11 +39,16 @@ def default_datasets(cfg: dict) -> list[str]:
 
 
 def warn_on_split_mismatch(datasets: list[str], cfg: dict):
-    """Original and tagged splits overlap, so crossing them scores on training data."""
+    """Original and tagged splits overlap, so crossing them scores on training data.
+
+    Tagged splits are assumed consistent with each other (e.g. `final` and
+    `final-no_filter2k` share the speaker separation), so only crossing between an
+    original split and a tagged one is flagged.
+    """
     tag = cfg.get("split_tag")
     for name in datasets:
         how2 = parse_dataset_name(name)
-        if how2 is not None and how2[1] != tag:
+        if how2 is not None and (how2[1] is None) != (tag is None):
             print(
                 f"WARNING: `{name}` is not from the split this model was trained on "
                 f"(split_tag={tag}); it may contain training segments.",
