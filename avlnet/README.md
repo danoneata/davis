@@ -61,8 +61,8 @@ Grouped `.pkl` schema (produced by `/data/how2/clean_code/segments/group_embeddi
 > ```
 >
 > It refuses to write unless a random sample of per-segment embeddings still
-> matches the corresponding grouped rows. `train_grouped_ids.json` already
-> exists (184,924 IDs). **Re-run it after regenerating any grouped `.pkl`, or
+> matches the corresponding grouped rows. The sidecars already exist for all
+> three splits. **Re-run it after regenerating any grouped `.pkl`, or
 > after adding/removing/renaming files under `embeddings/<split>/`** — the
 > spot-checks will catch a stale sidecar rather than let training silently use
 > mislabeled data.
@@ -276,6 +276,37 @@ them in the alignment-scores file) are ignored. An empty selection, or one
 smaller than `batch_size` under `drop_last`, is an error rather than a silent
 no-op. See `filtering.py`.
 
+### Speaker-separated splits (`split_tag`)
+
+The original How2 splits share speakers across folds. `split_tag` replaces all three
+with the filelists `data/filelists/how2_{train,val,dev5}-<tag>.json`; `final` is the
+speaker-separated split:
+
+```yaml
+split_tag: final
+```
+
+| Split | Segments | Speakers | From original train / val / dev5 |
+| ----- | -------- | -------- | -------------------------------- |
+| train | 152,218  | 1,698    | 148,785 / 1,519 / 1,914          |
+| val   | 2,009    | 127      | 1,966 / 27 / 16                  |
+| dev5  | 2,001    | 145      | 1,958 / 18 / 25                  |
+
+The 25 segments of `c0eUfSt8Dro` in the train filelist have no embeddings and are
+dropped. The splits cut across the original ones, so rows are looked up in the grouped
+pickles through the sidecars of **all three**; run `make_grouped_ids.py` for `train`,
+`val` and `dev5` if any is regenerated. See `how2_splits.py`.
+
+> [!WARNING]
+> Original and tagged splits overlap: most of `how2-dev5` is in `how2_train-final`, and
+> most of `how2-dev5-final` is in the original train. `evaluate.py` defaults to the
+> test split matching the config's `split_tag` and warns on any crossed How2 dataset;
+> treat a crossed number as contaminated.
+
+`filter` applies on top of the tagged train split. Note that
+`how2-train-alignment-scores.jsonl` covers the original train only, so `from_list`
+with it drops the tagged segments from the original val and dev5.
+
 ### Training budget (`max_steps`)
 
 Filtering shrinks the training set, so at fixed `n_epochs` it also shortens the
@@ -340,8 +371,9 @@ uv run evaluate.py <config_name> [--datasets a,b,c] [--direction v2a|a2v|both]
 ```
 
 Reports R@10 and MRR, ranked against the whole pool. Dataset names are either a
-How2 split (`how2-train`/`how2-val`/`how2-dev5`) or a key of
-`extract_features.DATASETS`; the default set is `how2-dev5,msr-vtt,youcook2`.
+How2 split (`how2-train`/`how2-val`/`how2-dev5`, optionally with a filelist tag, as
+in `how2-dev5-final`) or a key of `extract_features.DATASETS`; the default set is
+`how2-dev5,msr-vtt,youcook2`, with `how2-dev5-<tag>` for a config with a `split_tag`.
 
 `--direction` picks which side asks the questions: `v2a` (the default, and what
 training reports), `a2v`, or `both`. With a single direction the CSV keeps its
@@ -393,7 +425,8 @@ uv run streamlit run show_results.py
 Sidebar controls:
 - **Model** — a subdirectory of `checkpoints/`; the architecture is rebuilt from
   the config stored inside `best.pt`.
-- **Dataset** — a How2 split (`how2-val`, `how2-dev5`, `how2-train`) or a key of
+- **Dataset** — a How2 split (`how2-val`, `how2-dev5`, `how2-train`, or the
+  speaker-separated `how2-val-final`, `how2-dev5-final`, `how2-train-final`) or a key of
   `extract_features.DATASETS` (`msr-vtt`, `youcook2`, `flickr8k`).
 - **Direction** — `audio→video` or `video→audio` (shown as `audio→image` /
   `image→audio` for image datasets).

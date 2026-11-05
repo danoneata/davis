@@ -1,0 +1,11 @@
+root: /data/how2/clean_code/how2/embeddings
+split_tag: final
+batch_size: 128
+n_epochs: 100
+projection_dim: 128
+use_video: false
+checkpoint_dir: checkpoints
+eval_every: 500
+# run-03-full on the speaker-separated split. The split has fewer segments (152,218,
+# so 1189 steps/epoch), so max_steps pins the budget to run-03-full's 144400.
+max_steps: 144400

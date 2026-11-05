@@ -10,6 +10,7 @@ from tqdm import tqdm
 
 from evaluate import HOW2_SPLITS
 from extract_features import DATASETS, list_videos, read_wav2capt
+from how2_splits import load_tagged_split, parse_dataset_name, read_filelist
 from retrieval import A2V, AUDIO, V2A, VISUAL, build_problem, score_problem
 from train import DualEncoder
 from utils import read_file
@@ -19,15 +20,29 @@ EMBEDDINGS_ROOT = Path("/data/how2/clean_code/how2/embeddings")
 CACHE_ROOT = Path(__file__).parent / "cache"
 DEFAULT_CHECKPOINT = Path(__file__).parent / "checkpoints" / "run-00" / "best.pt"
 # How2 splits plus the external evaluation datasets registered in extract_features.
-DATASETS_ALL = ["how2-val", "how2-dev5", "how2-train", *sorted(DATASETS)]
+DATASETS_ALL = [
+    "how2-val",
+    "how2-dev5",
+    "how2-train",
+    "how2-val-final",
+    "how2-dev5-final",
+    "how2-train-final",
+    *sorted(DATASETS),
+]
 MAX_TOPK = 20
 # The sidebar labels, mapped to the direction codes `retrieval.build_problem` takes.
 DIRECTION_CODES = {"audio→video": A2V, "video→audio": V2A}
 
 
+def tagged_split(dataset: str) -> tuple[str, str] | None:
+    """`(split, tag)` for a How2 split defined by a filelist, else None."""
+    how2 = parse_dataset_name(dataset)
+    return how2 if how2 is not None and how2[1] is not None else None
+
+
 def dataset_kind(dataset: str) -> str:
     """"video" (one video per item) or "image" (a still image with spoken captions)."""
-    if dataset in HOW2_SPLITS:
+    if dataset in HOW2_SPLITS or tagged_split(dataset):
         return "video"
     if dataset in DATASETS:
         return DATASETS[dataset].get("kind", "video")
@@ -58,6 +73,8 @@ def cache_tag(dataset: str) -> str:
     """
     if dataset in HOW2_SPLITS:
         return HOW2_SPLITS[dataset]
+    if tagged_split(dataset):
+        return dataset
     digest = hashlib.md5(str(embeddings_dir(dataset)).encode()).hexdigest()[:6]
     return f"{dataset}-{digest}"
 
@@ -70,6 +87,19 @@ def _embedding_files(dataset: str) -> tuple:
             f"Run: uv run extract_features.py {dataset}"
         )
     return emb_dir, sorted(f for f in os.listdir(emb_dir) if f.endswith(".pkl"))
+
+
+def build_tagged_pool_cache(dataset: str, cache_path: Path) -> Path:
+    split, tag = tagged_split(dataset)
+    arrays, ids = load_tagged_split(str(EMBEDDINGS_ROOT), split, tag)
+    payload = {
+        "kind": "video",
+        "ids": ids,
+        **{key: value.astype(np.float32) for key, value in arrays.items()},
+    }
+    with open(cache_path, "wb") as f:
+        pickle.dump(payload, f)
+    return cache_path
 
 
 def build_video_pool_cache(dataset: str, cache_path: Path) -> Path:
@@ -142,7 +172,7 @@ def build_pool_cache(dataset: str) -> Path:
         builder = build_image_pool_cache
     else:
         cache_path = CACHE_ROOT / f"pool_{cache_tag(dataset)}.pkl"
-        builder = build_video_pool_cache
+        builder = build_tagged_pool_cache if tagged_split(dataset) else build_video_pool_cache
     if cache_path.exists():
         return cache_path
     return builder(dataset, cache_path)
@@ -244,6 +274,9 @@ def video_index(dataset: str) -> dict:
 
 def video_path(dataset: str, segment_id: str) -> Path:
     # How2 segment dirs are large, so build the path directly instead of listing them.
+    if tagged_split(dataset):
+        source = read_filelist(*tagged_split(dataset))[segment_id]
+        return SEGMENTS_ROOT / source / f"{segment_id}.mp4"
     if dataset in HOW2_SPLITS:
         return videos_dir(dataset) / f"{segment_id}.mp4"
     default = videos_dir(dataset) / f"{segment_id}.mp4"

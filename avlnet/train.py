@@ -1,6 +1,5 @@
 import torch
 import os
-import pickle
 import glob
 import numpy as np
 from tqdm import tqdm
@@ -12,7 +11,7 @@ import yaml
 from pathlib import Path
 
 from filtering import select_indices
-from make_grouped_ids import load_grouped_ids
+from how2_splits import filelist_path, load_split, load_split_ids
 
 
 CONFIGS_DIR = Path(__file__).parent / "configs"
@@ -31,10 +30,9 @@ def load_config(config_name: str) -> dict:
 
 
 class Dataset(torch.utils.data.Dataset):
-    def __init__(self, embeddings_path: str, indices=None):
+    def __init__(self, embeddings: dict, indices=None):
         """`indices` restricts the dataset to a subset of rows; None uses all of them."""
-        with open(embeddings_path, "rb") as f:
-            self.embeddings = pickle.load(f)
+        self.embeddings = embeddings
         n = len(self.embeddings["video_embeddings"])
         self.indices = np.arange(n) if indices is None else np.asarray(indices)
 
@@ -201,6 +199,7 @@ def run_training(
     drop_last: bool = True,
     filter: dict = None,
     max_steps: int = None,
+    split_tag: str = None,
 ):
     """Train the adapters on precomputed How2 embeddings.
 
@@ -232,14 +231,19 @@ def run_training(
     confounding data quality with training length. Since a filtered set also
     makes epochs shorter, set `eval_every` explicitly when filtering, or the
     evaluation cadence -- and with it the effective patience -- shifts too.
+
+    `split_tag` trains, validates and tests on the filelists
+    `data/filelists/how2_{train,val,dev5}-<split_tag>.json` instead of the original
+    How2 splits (see `how2_splits.py`).
     """
     if loss not in LOSSES:
         raise ValueError(f"Unknown loss `{loss}`. Available: {sorted(LOSSES)}")
     loss_fn = LOSSES[loss]
 
-    train_embeddings = os.path.join(root, "train_grouped_embeddings.pkl")
-    val_embeddings = os.path.join(root, "val_grouped_embeddings.pkl")
-    test_embeddings = os.path.join(root, "dev5_grouped_embeddings.pkl")
+    def split_source(split: str) -> str:
+        if split_tag is None:
+            return os.path.join(root, f"{split}_grouped_embeddings.pkl")
+        return str(filelist_path(split, split_tag))
 
     checkpoint_path = os.path.join(checkpoint_dir, experiment_name, "best.pt")
     os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
@@ -249,18 +253,19 @@ def run_training(
     if filter is not None:
         train_indices = select_indices(
             filter,
-            load_grouped_ids(root, "train"),
+            load_split_ids(root, "train", split_tag),
             min_size=batch_size if drop_last else 1,
         )
 
-    dataset = Dataset(train_embeddings, indices=train_indices)
+    dataset = Dataset(load_split(root, "train", split_tag), indices=train_indices)
 
     wandb.init(
         project="avlnet",
         name=experiment_name,
         config={
-            "train_embeddings": train_embeddings,
-            "val_embeddings": val_embeddings,
+            "train_embeddings": split_source("train"),
+            "val_embeddings": split_source("val"),
+            "split_tag": split_tag,
             "batch_size": batch_size,
             "n_epochs": n_epochs,
             "projection_dim": projection_dim,
@@ -284,14 +289,14 @@ def run_training(
         # so it would inject noise into the loss curve at large batch sizes.
         drop_last=drop_last,
     )
-    val_dataset = Dataset(val_embeddings)
+    val_dataset = Dataset(load_split(root, "val", split_tag))
     val_dataloader = torch.utils.data.DataLoader(
         val_dataset,
         batch_size=5000,
         shuffle=False,
         num_workers=0,
     )
-    test_dataset = Dataset(test_embeddings)
+    test_dataset = Dataset(load_split(root, "dev5", split_tag))
     test_dataloader = torch.utils.data.DataLoader(
         test_dataset,
         batch_size=5000,

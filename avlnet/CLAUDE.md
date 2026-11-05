@@ -44,5 +44,9 @@ getting this wrong mislabels training data silently instead of erroring.
   point. `train.evaluate` deliberately does not: it keeps its own diagonal-only
   ranking so training-time numbers stay comparable across old runs.
 - `filtering.py` — the config-driven training-subset filters (`filter:` key).
+- `how2_splits.py` — loads How2 as originally split or through a filelist (`split_tag:`
+  key, e.g. the speaker-separated `final`). Tagged splits cut across the original ones,
+  so results must not be crossed between the two: most of `how2-dev5` is training data
+  for a `split_tag: final` model.
 - `extract_features.py` — feature extraction for the non-How2 datasets (`DATASETS`).
 - `show_results.py`, `show_alignment_scores.py` — Streamlit viewers.

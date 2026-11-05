@@ -1,5 +1,6 @@
 import os
 import pickle
+import sys
 
 import fire
 import numpy as np
@@ -8,6 +9,7 @@ from tqdm import tqdm
 import pandas as pd
 
 from extract_features import DATASETS
+from how2_splits import load_split, parse_dataset_name
 from retrieval import (
     DIRECTIONS,
     V2A,
@@ -28,13 +30,25 @@ DEFAULT_DATASETS = ("how2-dev5", "msr-vtt", "youcook2")
 ENCODE_CHUNK = 4096
 
 
-def _load_how2_split(root: str, split: str):
-    path = os.path.join(root, f"{split}_grouped_embeddings.pkl")
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"How2 embeddings not found: {path}")
-    with open(path, "rb") as f:
-        d = pickle.load(f)
-    return d["video_embeddings"], d["image_embeddings"], d["audio_embeddings"]
+def default_datasets(cfg: dict) -> list[str]:
+    """`DEFAULT_DATASETS`, with How2 test being the test split the run was trained for."""
+    tag = cfg.get("split_tag")
+    if tag is None:
+        return list(DEFAULT_DATASETS)
+    return [f"{name}-{tag}" if parse_dataset_name(name) else name for name in DEFAULT_DATASETS]
+
+
+def warn_on_split_mismatch(datasets: list[str], cfg: dict):
+    """Original and tagged splits overlap, so crossing them scores on training data."""
+    tag = cfg.get("split_tag")
+    for name in datasets:
+        how2 = parse_dataset_name(name)
+        if how2 is not None and how2[1] != tag:
+            print(
+                f"WARNING: `{name}` is not from the split this model was trained on "
+                f"(split_tag={tag}); it may contain training segments.",
+                file=sys.stderr,
+            )
 
 
 def _load_external_dataset(name: str):
@@ -123,8 +137,10 @@ def _load_dataset(name: str, cfg: dict) -> dict:
     Video datasets pair one clip with one visual item, so `audio_to_visual` is the
     identity; see `_load_image_dataset` for the multi-caption case.
     """
-    if name in HOW2_SPLITS:
-        arrays = _load_how2_split(cfg["root"], HOW2_SPLITS[name])
+    how2 = parse_dataset_name(name)
+    if how2 is not None:
+        d = load_split(cfg["root"], *how2)
+        arrays = d["video_embeddings"], d["image_embeddings"], d["audio_embeddings"]
     elif name in DATASETS:
         if DATASETS[name].get("kind", "video") == "image":
             return _load_image_dataset(name)
@@ -132,7 +148,8 @@ def _load_dataset(name: str, cfg: dict) -> dict:
     else:
         raise ValueError(
             f"Unknown dataset `{name}`. Available: "
-            f"how2 splits {list(HOW2_SPLITS)} or external {sorted(DATASETS)}."
+            f"how2 splits {list(HOW2_SPLITS)} (optionally `-<tag>`, e.g. "
+            f"how2-dev5-final) or external {sorted(DATASETS)}."
         )
     video, image, audio = arrays
     return {
@@ -177,8 +194,8 @@ def _encode_pool(model, pool: dict, device) -> dict:
 def main(config_name: str, datasets=None, direction: str = V2A):
     """Evaluate the best checkpoint for `config_name` on one or more datasets.
 
-    By default, reports R@1/5/10, MRR and median rank on: how2-dev5 (How2 test),
-    msr-vtt, youcook2.
+    By default, reports R@1/5/10, MRR and median rank on: how2-dev5 (How2 test, or
+    how2-dev5-<tag> for a config with a `split_tag`), msr-vtt, youcook2.
 
     Example:
         uv run evaluate.py default
@@ -187,7 +204,8 @@ def main(config_name: str, datasets=None, direction: str = V2A):
         uv run evaluate.py run-01-novideo --datasets flickr8k --direction both
 
     `datasets` may be a comma-separated string or a list. Each name is either
-    a How2 split (how2-train/how2-val/how2-dev5) or a key of extract_features.DATASETS.
+    a How2 split (how2-train/how2-val/how2-dev5, optionally suffixed with a filelist
+    tag as in how2-dev5-final) or a key of extract_features.DATASETS.
 
     `direction` is `v2a` (visual queries, audio gallery -- the default and what
     training reports), `a2v`, or `both`. The two are not transposes of each other on
@@ -195,8 +213,10 @@ def main(config_name: str, datasets=None, direction: str = V2A):
     all five captions of the query image counting as correct, while `a2v` queries each
     of the 5,000 clips against the 1,000 images with a single correct answer.
     """
+    cfg = load_config(config_name)
+
     if datasets is None:
-        datasets = list(DEFAULT_DATASETS)
+        datasets = default_datasets(cfg)
     elif isinstance(datasets, str):
         datasets = [s.strip() for s in datasets.split(",") if s.strip()]
     else:
@@ -211,7 +231,8 @@ def main(config_name: str, datasets=None, direction: str = V2A):
             f"Unknown direction `{direction}`. Available: {[*DIRECTIONS, 'both']}."
         )
 
-    cfg = load_config(config_name)
+    warn_on_split_mismatch(datasets, cfg)
+
     checkpoint_dir = cfg.get("checkpoint_dir", "checkpoints")
     checkpoint_path = os.path.join(checkpoint_dir, config_name, "best.pt")
     if not os.path.exists(checkpoint_path):
