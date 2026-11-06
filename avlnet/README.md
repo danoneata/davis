@@ -212,6 +212,23 @@ loss: siglip           # siglip (sigmoid pairwise) or infonce (symmetric CLIP)
 checkpoint_dir: checkpoints
 ```
 
+Optimisation keys (all optional; the defaults are what every config before
+`run-08` used):
+
+```yaml
+lr: 3.0e-4          # default: 3e-4 * sqrt(batch_size / 128) (`scale_lr`)
+weight_decay: 0.01  # AdamW, decoupled
+warmup_steps: 1000  # linear warmup, then cosine to 0; default: 10% of the steps
+max_steps: 30000    # overrides n_epochs * steps_per_epoch
+eval_every: 500     # in steps; default: one epoch
+patience: 10        # evaluations without val gain before stopping; 0 disables
+min_steps: 3000     # no early stop before this step (e.g. during warmup)
+seed: 1             # seeds torch/numpy (init and data order); default: unseeded
+```
+
+Write floats with a dot (`3.0e-4`): PyYAML reads `3e-4` as a string. `train.py`
+casts `lr` and `weight_decay`, but other keys get no such help.
+
 ### Objectives (`loss`)
 
 The training objective is a config key, resolved through the `LOSSES` table in

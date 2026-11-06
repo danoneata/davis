@@ -383,6 +383,11 @@ def run_training(
     split_tag: str = None,
     positive_filter: dict = None,
     group_negatives: dict = None,
+    lr: float = None,
+    weight_decay: float = 0.01,
+    warmup_steps: int = None,
+    min_steps: int = 0,
+    seed: int = None,
 ):
     """Train the adapters on precomputed How2 embeddings.
 
@@ -395,8 +400,9 @@ def run_training(
     and `siglip` does not, which makes InfoNCE the more batch-size-sensitive of
     the two -- comparisons between them hold at the batch size they were run at.
 
-    The learning rate is not a free parameter: it is derived from `batch_size` as
-    BASE_LR * sqrt(batch_size / BASE_BATCH_SIZE) (see `scale_lr`). So when
+    By default the learning rate is derived from `batch_size` as
+    BASE_LR * sqrt(batch_size / BASE_BATCH_SIZE) (see `scale_lr`); an explicit `lr`
+    overrides that (and then does not follow `batch_size`). With the default, when
     scaling `batch_size`, keep `n_epochs` fixed -- the number of data passes then
     stays constant, and the learning rate follows automatically. Holding the step
     count constant instead would also multiply the number of data passes,
@@ -414,6 +420,12 @@ def run_training(
     confounding data quality with training length. Since a filtered set also
     makes epochs shorter, set `eval_every` explicitly when filtering, or the
     evaluation cadence -- and with it the effective patience -- shifts too.
+
+    `weight_decay` is AdamW's (decoupled) decay. `warmup_steps` is the length of the
+    linear warmup before the cosine decay; None means 10% of the total steps.
+    `min_steps` blocks early stopping before that step (e.g. during warmup, where
+    run-05-speaker-full stopped); evaluations still count towards `patience`.
+    `seed`, if set, seeds torch and numpy before the model and data order are built.
 
     `split_tag` trains, validates and tests on the filelists
     `data/filelists/how2_{train,val,dev5}-<split_tag>.json` instead of the original
@@ -433,6 +445,12 @@ def run_training(
     if loss not in LOSSES:
         raise ValueError(f"Unknown loss `{loss}`. Available: {sorted(LOSSES)}")
     loss_fn = LOSSES[loss]
+    # float() because PyYAML (YAML 1.1) reads `3e-4` without a dot as a string.
+    lr = scale_lr(batch_size) if lr is None else float(lr)
+    weight_decay = float(weight_decay)
+    if seed is not None:
+        torch.manual_seed(seed)
+        np.random.seed(seed)
 
     def split_source(split: str) -> str:
         if split_tag is None:
@@ -485,7 +503,11 @@ def run_training(
             "projection_dim": projection_dim,
             "use_video": use_video,
             "loss": loss,
-            "lr": scale_lr(batch_size),
+            "lr": lr,
+            "weight_decay": weight_decay,
+            "warmup_steps": warmup_steps,
+            "min_steps": min_steps,
+            "seed": seed,
             "patience": patience,
             "select_metric": select_metric,
             "filter": filter,
@@ -562,7 +584,7 @@ def run_training(
     # optim_muon.zero_grad()
     # optim_adamw.zero_grad()
     optimizer = torch.optim.AdamW(
-        model.parameters(), lr=scale_lr(batch_size), weight_decay=0.01
+        model.parameters(), lr=lr, weight_decay=weight_decay
     )
     optimizer.zero_grad()
 
@@ -576,7 +598,9 @@ def run_training(
     # run can be as long as an unfiltered one; epochs then just repeat the subset.
     total_steps = max_steps if max_steps is not None else n_epochs * steps_per_epoch
     n_epochs_effective = math.ceil(total_steps / steps_per_epoch)
-    warmup_steps = int(0.1 * total_steps)
+    if warmup_steps is None:
+        warmup_steps = int(0.1 * total_steps)
+    print(f"lr={lr:g} weight_decay={weight_decay:g} warmup_steps={warmup_steps} total_steps={total_steps}")
     def lr_lambda(current_step: int):
         if current_step < warmup_steps:
             return float(current_step) / float(max(1, warmup_steps))
@@ -684,7 +708,11 @@ def run_training(
 
             if global_step % eval_every == 0:
                 run_evaluation(epoch)
-                if patience and evals_without_improvement >= patience:
+                if (
+                    patience
+                    and evals_without_improvement >= patience
+                    and global_step >= min_steps
+                ):
                     print(
                         f"Early stopping at step {global_step} (epoch {epoch}): "
                         f"val {select_metric} did not improve on the last "
