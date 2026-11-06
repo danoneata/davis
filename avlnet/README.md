@@ -344,6 +344,26 @@ early stopping (`patience: 0`):
 | `run-06-random63k` | random 63,261 segments (size control for `run-06-lm8`)         |
 | `run-06-lm8-negs`  | `lm_score >= 8` as positives, plus 128 others per batch as negatives |
 
+### Same-speaker negatives (`group_negatives`)
+
+With random batches nearly every negative has a different speaker, so pairs can be
+told apart by voice ↔ appearance alone, a cue that does not transfer to the
+speaker-disjoint `final` folds. `group_negatives` builds each batch from a few
+groups instead, so some negatives always share the speaker:
+
+```yaml
+split_tag: final          # required: the groups come from the filelist records
+group_negatives: {by: speaker_id, per_group: 8}   # any record field, e.g. original_video_id
+```
+
+A batch of 128 is about 16 speakers × 8 segments. Speakers are drawn with
+probability proportional to their segment count, and smaller ones give all they
+have. Cross-speaker pairs are still negatives. With `positive_filter`, only
+positives fill the groups, and the `extra_negatives` come from the same speakers
+where possible. Batches are drawn independently, so an epoch is nominal and
+`max_steps` sets the length. The `run-07-spk-*` configs are the four `run-06` arms
+with this added.
+
 ### Training budget (`max_steps`)
 
 Filtering shrinks the training set, so at fixed `n_epochs` it also shortens the

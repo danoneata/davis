@@ -1,0 +1,21 @@
+root: /data/how2/clean_code/how2/embeddings
+split_tag: final
+batch_size: 128
+n_epochs: 100
+projection_dim: 128
+use_video: false
+loss: siglip
+checkpoint_dir: checkpoints
+eval_every: 500
+max_steps: 144400
+# No early stopping: run-05-speaker-full stopped during warmup. The best checkpoint
+# is still picked by val r5.
+patience: 0
+# Arm 3: size control for run-06-lm8, a random subset of the same size.
+filter:
+  type: random
+  n: 63261
+  seed: 42
+# run-07: speaker-grouped batches, 16 speakers x 8 segments, so each item has 7
+# same-speaker negatives; cross-speaker pairs still count as negatives.
+group_negatives: {by: speaker_id, per_group: 8}

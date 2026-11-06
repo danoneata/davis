@@ -1,0 +1,22 @@
+root: /data/how2/clean_code/how2/embeddings
+split_tag: final
+batch_size: 128
+n_epochs: 100
+projection_dim: 128
+use_video: false
+loss: siglip
+checkpoint_dir: checkpoints
+eval_every: 500
+max_steps: 144400
+# No early stopping: run-05-speaker-full stopped during warmup. The best checkpoint
+# is still picked by val r5.
+patience: 0
+# Arm 4: positives are the lm_score >= 8 segments, as in run-06-lm8, with 128 of the
+# remaining segments added to each batch as negatives only. Same positives per step
+# as run-06-lm8, so the two differ only in the extra negatives.
+positive_filter:
+  predicate: {field: lm_score, op: ">=", value: 8}
+  extra_negatives: 128
+# run-07: speaker-grouped batches, 16 speakers x 8 segments, so each item has 7
+# same-speaker negatives; cross-speaker pairs still count as negatives.
+group_negatives: {by: speaker_id, per_group: 8}

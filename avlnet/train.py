@@ -95,6 +95,113 @@ class PositivesWithNegativesSampler(torch.utils.data.Sampler):
         return len(self.positives) // self.batch_size
 
 
+class GroupedBatchSampler(torch.utils.data.Sampler):
+    """Batches made of a few groups (e.g. speakers), `per_group` items from each.
+
+    Each batch draws groups without replacement, with probability proportional to
+    their number of eligible items (so every segment is drawn about equally often),
+    and takes `min(per_group, size)` random items from each until `batch_size` items
+    are collected; the last group is cut short. Pairs across groups still count as
+    negatives -- grouping only guarantees that some negatives share the group.
+
+    `eligible` restricts which items fill the batch (the positives under a
+    `positive_filter`). `extra_negatives` then adds that many non-eligible items:
+    up to `extra_negatives // n_groups` from each group in the batch, topped up at
+    random from all non-eligible items, so the negatives share groups too.
+
+    An epoch is nominal (`n_eligible // batch_size` batches): batches are drawn
+    independently, so the training length is set by `max_steps`.
+    """
+
+    def __init__(
+        self,
+        groups: np.ndarray,
+        batch_size: int,
+        per_group: int,
+        seed: int = 0,
+        eligible: np.ndarray = None,
+        extra_negatives: int = 0,
+    ):
+        groups = np.asarray(groups)
+        eligible = np.ones(len(groups), dtype=bool) if eligible is None else np.asarray(eligible)
+        self.batch_size = batch_size
+        self.per_group = per_group
+        self.extra_negatives = extra_negatives
+        self.rng = np.random.default_rng(seed)
+        self.n_eligible = int(eligible.sum())
+        if self.n_eligible < batch_size:
+            raise ValueError(
+                f"{self.n_eligible} eligible items, fewer than batch_size={batch_size}."
+            )
+
+        def by_group(mask):
+            out = {}
+            for i in np.flatnonzero(mask):
+                out.setdefault(groups[i], []).append(i)
+            return {g: np.array(v) for g, v in out.items()}
+
+        self.members = by_group(eligible)
+        self.group_names = list(self.members)
+        sizes = np.array([len(self.members[g]) for g in self.group_names], dtype=float)
+        self.group_probs = sizes / sizes.sum()
+        self.others = by_group(~eligible)
+        self.all_others = np.flatnonzero(~eligible)
+        if extra_negatives > len(self.all_others):
+            raise ValueError(
+                f"extra_negatives={extra_negatives} but only {len(self.all_others)} "
+                f"non-eligible items."
+            )
+
+    @property
+    def n_groups(self) -> int:
+        return len(self.group_names)
+
+    def _take(self, pool: np.ndarray, k: int) -> np.ndarray:
+        return self.rng.choice(pool, size=min(k, len(pool)), replace=False)
+
+    def _batch(self) -> list[int]:
+        # Enough groups to fill the batch even if every group is small; the greedy
+        # loop stops as soon as `batch_size` items are in.
+        n_draw = min(self.n_groups, self.batch_size)
+        order = self.rng.choice(self.n_groups, size=n_draw, replace=False, p=self.group_probs)
+        batch, used = [], []
+        for gi in order:
+            g = self.group_names[gi]
+            take = self._take(self.members[g], min(self.per_group, self.batch_size - len(batch)))
+            batch.extend(take.tolist())
+            used.append(g)
+            if len(batch) == self.batch_size:
+                break
+
+        if self.extra_negatives:
+            per = self.extra_negatives // len(used)
+            extra = []
+            for g in used:
+                if g in self.others:
+                    extra.extend(self._take(self.others[g], per).tolist())
+            extra = extra[: self.extra_negatives]
+            if len(extra) < self.extra_negatives:
+                pool = np.setdiff1d(self.all_others, extra, assume_unique=True)
+                extra.extend(self._take(pool, self.extra_negatives - len(extra)).tolist())
+            batch.extend(extra)
+        return batch
+
+    def __iter__(self):
+        for _ in range(len(self)):
+            yield self._batch()
+
+    def __len__(self):
+        return self.n_eligible // self.batch_size
+
+
+def group_labels(spec: dict, ids: list[str], split_tag: str) -> np.ndarray:
+    """The group of each of `ids`: field `spec["by"]` of its filelist record."""
+    if split_tag is None:
+        raise ValueError("`group_negatives` needs `split_tag`: it reads the filelist records.")
+    records = read_records("train", split_tag)
+    return np.array([records[i][spec["by"]] for i in ids])
+
+
 def select_positives(spec: dict, ids: list[str], split_tag: str) -> np.ndarray:
     """Which of `ids` may be positive pairs, by `spec["predicate"]` on their records."""
     if split_tag is None:
@@ -275,6 +382,7 @@ def run_training(
     max_steps: int = None,
     split_tag: str = None,
     positive_filter: dict = None,
+    group_negatives: dict = None,
 ):
     """Train the adapters on precomputed How2 embeddings.
 
@@ -315,6 +423,12 @@ def run_training(
     training segments whose filelist record satisfies `predicate` as positive pairs.
     Each batch is `batch_size` of them plus `extra_negatives` of the rest, which count
     only as negatives (see `PositivesWithNegativesSampler`).
+
+    `group_negatives` (`{by, per_group}`, needs `split_tag`) builds each batch from a
+    few groups -- segments sharing the filelist field `by`, e.g. `speaker_id` -- with
+    `per_group` segments from each, so some negatives always share the group (see
+    `GroupedBatchSampler`). With `positive_filter` too, only positives fill the groups
+    and the extra negatives are drawn from the same groups where possible.
     """
     if loss not in LOSSES:
         raise ValueError(f"Unknown loss `{loss}`. Available: {sorted(LOSSES)}")
@@ -337,13 +451,23 @@ def run_training(
             min_size=batch_size if drop_last else 1,
         )
 
-    positive = None
-    if positive_filter is not None:
+    # Ids of the dataset's items (after `filter`), in dataset order: the positive mask
+    # and the group labels are both positional, so they must come from this list.
+    train_ids = None
+    if positive_filter is not None or group_negatives is not None:
         train_ids = load_split_ids(root, "train", split_tag)
         if train_indices is not None:
             train_ids = [train_ids[i] for i in train_indices]
+
+    positive = None
+    if positive_filter is not None:
         positive = select_positives(positive_filter, train_ids, split_tag)
         print(f"Positive filter: {positive.sum()} of {len(positive)} segments are positives.")
+
+    groups = None
+    if group_negatives is not None:
+        groups = group_labels(group_negatives, train_ids, split_tag)
+        print(f"Group negatives: {len(set(groups))} groups by `{group_negatives['by']}`.")
 
     dataset = Dataset(
         load_split(root, "train", split_tag), indices=train_indices, positive=positive
@@ -369,10 +493,25 @@ def run_training(
             "max_steps": max_steps,
             "positive_filter": positive_filter,
             "n_positive": int(dataset.positive.sum()),
+            "group_negatives": group_negatives,
+            "n_groups": None if groups is None else len(set(groups)),
         }
     )
 
-    if positive_filter is None:
+    if group_negatives is not None:
+        dataloader = torch.utils.data.DataLoader(
+            dataset,
+            batch_sampler=GroupedBatchSampler(
+                groups,
+                batch_size,
+                group_negatives["per_group"],
+                eligible=dataset.positive,
+                extra_negatives=0 if positive_filter is None
+                else positive_filter.get("extra_negatives", 0),
+            ),
+            num_workers=0,
+        )
+    elif positive_filter is None:
         dataloader = torch.utils.data.DataLoader(
             dataset,
             batch_size=batch_size,
