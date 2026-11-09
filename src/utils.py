@@ -2,6 +2,7 @@
 from __future__ import absolute_import, division, unicode_literals, print_function
 
 from pathlib import Path
+import torch as th
 import os
 from src.model import Net
 from omegaconf import OmegaConf
@@ -248,3 +249,48 @@ def update_top_checkpoints(net, run_checkpoint_dir, epoch, metric_value, metric_
             os.remove(old_path)
 
     return new_top
+
+
+def visual_key_map(manifest_path):
+    """clip id -> visual item key, read from a JSONL manifest.
+
+    The clip id is the audio file stem (as in read_manifest); the visual key is
+    the video/image file stem. Several clips can share one visual item (Flickr8k:
+    <id>.jpg with audios <id>_0..4.wav). Plain-text manifests -> {} (1-to-1).
+    """
+    keys = {}
+    if not manifest_path:
+        return keys
+    with open(manifest_path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            r = json.loads(line)
+            visual = r.get("video_path") or r.get("image_path")
+            clip = r.get("audio_path") or visual
+            if clip and visual:
+                keys[Path(clip).stem] = Path(visual).stem
+    return keys
+
+
+@th.no_grad()
+def embed_split(model, eval_dataloader, extra_keys=()):
+    """Run the model over a whole split -> (audio (N, D), video (N, D), clip ids).
+    With extra_keys, also returns {key: list} of those batch fields (e.g. speaker_id)."""
+    model.eval()
+    all_audio, all_video, ids = [], [], []
+    extra = {k: [] for k in extra_keys}
+    for data in eval_dataloader:
+        video = data["video"].cuda()
+        audio = data["audio"].cuda()
+        audio_mask = data["audio_mask"].cuda() if "audio_mask" in data else None
+        audio_out, video_out = model(video, audio, audio_mask)
+        all_audio.append(audio_out)
+        all_video.append(video_out)
+        ids.extend(data["video_id"])
+        for k in extra_keys:
+            extra[k].extend(data[k])
+    if extra_keys:
+        return th.cat(all_audio), th.cat(all_video), ids, extra
+    return th.cat(all_audio), th.cat(all_video), ids

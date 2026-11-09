@@ -4,17 +4,17 @@
 
 dataset_name: how2-wavlm
 embeddings_path: null #/mnt/private-share/speechDatabases/how2/processed_how2/embeddings
-train_embs_path: /mnt/private-share/speechDatabases/how2/processed_how2/embeddings/all/
+train_embs_path: null
 train_ids_path: /mnt/private-share/speechDatabases/davis-gabi/how2-spkr-sep/how2_train-final.json #/mnt/private-share/speechDatabases/Panda70M/manifests_scenes/panda_train.json #/mnt/private-share/speechDatabases/how2/processed_how2/train.txt
-val_embs_path: /mnt/private-share/speechDatabases/how2/processed_how2/embeddings/all/
+val_embs_path: null
 val_ids_path:  /mnt/private-share/speechDatabases/davis-gabi/how2-spkr-sep/how2_val-final.json #/mnt/private-share/speechDatabases/how2/processed_how2/val.txt
-test_embs_path: /mnt/private-share/speechDatabases/how2/processed_how2/embeddings/all/
+test_embs_path: null
 test_ids_path:  /mnt/private-share/speechDatabases/davis-gabi/how2-spkr-sep/how2_dev5-final.json
 
 # MODEL
-image_dim: 768 # 1536       # DINOv2 image embedding dim
+image_dim: 1536       # DINOv2 image embedding dim
 video_feat_dim: 1024  # V-JEPA2 video embedding dim
-audio_dim: 768  # SPEAR audio embedding (1280) dim (768 for WavLM)
+audio_dim: 1280  # SPEAR audio embedding (1280) dim (768 for WavLM)
 # true  -> mean-pool audio frames [T, D] -> [D] in the dataset (original behaviour)
 # false -> keep frames [T, D], pad per batch, pool in the model with learned
 #          attention (starts as exact masked mean pooling)
@@ -24,7 +24,7 @@ normalize: true
 image_only: false
 
 # TRAINING PARAMS
-batch_size: 512
+batch_size: 256
 batch_size_val: 100000 # big value to cover whole validation
 # How training batches are formed (val/test always use plain batches):
 #   random  -> random samples from the whole dataset
@@ -68,4 +68,4 @@ wandb_project: how2-filter-walm
 # ${} interpolation pulls values from elsewhere in this same file, same as OmegaConf
 # does in the reference script.
 base_exp: how2-filter-wavlm
-experiment_name: ${base_exp}_${batch_mode}_${batch_size}_${lr}_${epochs}_${loss}_image-{image_only}
+experiment_name: ${base_exp}_${batch_mode}_${batch_size}_${lr}_${epochs}_${loss}_image-${image_only}

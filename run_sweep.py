@@ -36,14 +36,12 @@ from omegaconf import OmegaConf
 
 REPO = Path(__file__).resolve().parent
 
-HOW2_EMBS = "/mnt/private-share/speechDatabases/how2/processed_how2/embeddings/all/"
-GABI = "/mnt/private-share/speechDatabases/davis-gabi"
+HOW2_EMBS = "/mnt/private-share/speechDatabases/how2/processed_how2/embeddings-wavlm"
+GABI = "/mnt/private-share/speechDatabases/davis-gabi/"
 EVAL_SETS = {
-    "dev5": (f"{GABI}/how2-spkr-sep/how2_dev5-final.json", HOW2_EMBS),
-    "dev5_unfiltered": (f"{GABI}/how2-spkr-sep/how2_dev5-final-no_filter2k.json", HOW2_EMBS),
-    "msr-vtt": (f"{GABI}/embeddings/msr-vtt.txt", f"{GABI}/embeddings/msr-vtt"),
-    "youcook2": (f"{GABI}/embeddings/youcook2.txt", f"{GABI}/embeddings/youcook2"),
-    "flickr8k": (f"{GABI}/embeddings/flickr8k.txt", f"{GABI}/embeddings/flickr8k"),
+    "dev5": (f"{GABI}/manifests/how2_dev5-final.json", HOW2_EMBS),
+    "dev5_unfiltered": (f"{GABI}/manifests/how2_dev5-final-no_filter2k.json", HOW2_EMBS),
+    "flickr8k": (f"{GABI}/manifests/flickr8k_test.json", f"{GABI}/embeddings-wavlm/flickr8k"),
 }
 
 

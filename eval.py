@@ -35,6 +35,8 @@ from src.utils import (
     load_config,
     build_dataloader,
     build_model,
+    visual_key_map,
+    embed_split,
 
 )
 from src.metrics import rank_metrics, retrieval_ranks
@@ -44,45 +46,6 @@ from src.metrics import rank_metrics, retrieval_ranks
 th.backends.cudnn.benchmark = True
 
 CONFIGS_DIR = Path(__file__).parent / "configs"
-
-def visual_key_map(manifest_path):
-    """clip id -> visual item key, read from a JSONL manifest.
-
-    The clip id is the audio file stem (as in read_manifest); the visual key is
-    the video/image file stem. Several clips can share one visual item (Flickr8k:
-    <id>.jpg with audios <id>_0..4.wav). Plain-text manifests -> {} (1-to-1).
-    """
-    keys = {}
-    if not manifest_path:
-        return keys
-    with open(manifest_path, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line.startswith("{"):
-                continue
-            r = json.loads(line)
-            visual = r.get("video_path") or r.get("image_path")
-            clip = r.get("audio_path") or visual
-            if clip and visual:
-                keys[Path(clip).stem] = Path(visual).stem
-    return keys
-
-
-@th.no_grad()
-def embed_split(model, eval_dataloader):
-    """Run the model over a whole split -> (audio (N, D), video (N, D), clip ids)."""
-    model.eval()
-    all_audio, all_video, ids = [], [], []
-    for data in eval_dataloader:
-        video = data["video"].cuda()
-        audio = data["audio"].cuda()
-        audio_mask = data["audio_mask"].cuda() if "audio_mask" in data else None
-        audio_out, video_out = model(video, audio, audio_mask)
-        all_audio.append(audio_out)
-        all_video.append(video_out)
-        ids.extend(data["video_id"])
-    return th.cat(all_audio), th.cat(all_video), ids
-
 
 @th.no_grad()
 def eval_retrieval(model, eval_dataloader, dataset_name,

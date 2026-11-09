@@ -50,6 +50,7 @@ from src.metrics import (
     compute_metrics,
     print_computed_metrics,
     rank_metrics,
+    retrieval_ranks,
     within_group_ranks,
 )
 from src.utils import (
@@ -57,6 +58,8 @@ from src.utils import (
     build_dataloader,
     build_model,
     checkpoint_filename,
+    embed_split,
+    visual_key_map,
     is_better_metric,
     update_top_checkpoints,
 )
@@ -78,45 +81,28 @@ def train_one_batch(model, opt, data, loss_fun):
     return loss.item()
 
 @th.no_grad()
-def eval_retrieval(model, 
-                   eval_dataloader, 
+def eval_retrieval(model,
+                   eval_dataloader,
                    dataset_name,
                    eval_lang_retrieval=False,
                    within_speaker=False,
-                   wandb_log=False, 
-                   step=None):
-
+                   wandb_log=False,
+                   step=None,
+                   visual_keys=None):
+    """Full-corpus retrieval, identical to eval.py / eval_checkpoints.py: embeds the
+    whole split, ranks every query against every candidate (not per batch), and
+    deduplicates visual items shared by several audios (visual_keys, see
+    src.utils.visual_key_map; Flickr8k: 5 captions per image)."""
     model.eval()
     mode_str = "audio given input video clips" if eval_lang_retrieval else "video clips given input audio"
     print(f"Evaluating retrieval on {dataset_name} data: retrieving {mode_str}")
 
-    ranks = []
-    spk_ranks, spk_sizes = [], []
-
-    for data in eval_dataloader:
-        video = data["video"].cuda()
-        audio = data["audio"].cuda()
-        audio_mask = data["audio_mask"].cuda() if "audio_mask" in data else None
-
-        audio_out, video_out = model(video, audio, audio_mask)
-
-        logits = th.matmul(audio_out, video_out.t())
-        if eval_lang_retrieval:
-            logits = logits.t()
-
-        # The correct match for row i sits on the diagonal, so its rank is the
-        # number of distractors scoring strictly higher, plus one.
-        target_scores = logits.diagonal().unsqueeze(1)
-        ranks.append((logits > target_scores).sum(dim=1) + 1)
-
-        # Same ranking, but each query only competes against clips of its own
-        # speaker, so speaker/recording cues can't help.
-        if within_speaker:
-            r, n = within_group_ranks(logits, list(data["speaker_id"]))
-            spk_ranks.append(r)
-            spk_sizes.append(n)
-
-    ranks = th.cat(ranks).float()
+    extra_keys = ("speaker_id",) if within_speaker else ()
+    out = embed_split(model, eval_dataloader, extra_keys)
+    audio_out, video_out, ids = out[:3]
+    keys = [visual_keys.get(i, i) for i in ids] if visual_keys else None
+    a2v, v2a = retrieval_ranks(audio_out, video_out, keys)
+    ranks = v2a if eval_lang_retrieval else a2v
 
     # "MR" kept for backward compat with V1's key
     metrics = rank_metrics(ranks)
@@ -125,8 +111,12 @@ def eval_retrieval(model,
           ", ".join(f"{k}={v:.4f}" for k, v in metrics.items()))
 
     if within_speaker:
-        spk_ranks = th.cat(spk_ranks)
-        spk_sizes = th.cat(spk_sizes)
+        # Each query only competes against clips of its own speaker (row i <-> column i).
+        logits = audio_out @ video_out.t()
+        if eval_lang_retrieval:
+            logits = logits.t()
+        spk_ranks, spk_sizes = within_group_ranks(logits, list(out[3]["speaker_id"]))
+        del logits
         if len(spk_ranks):
             spk_metrics = rank_metrics(spk_ranks, prefix="spk_")
             chance = chance_rank_metrics(spk_sizes, prefix="spk_chance_")
@@ -236,6 +226,8 @@ def run_training(
     dataloader = build_dataloader(train_ids_path, embeddings_path, train_embs_path, normalize, image_only, batch_size, num_thread_reader, shuffle=True, drop_last=True, split="train", batch_mode=batch_mode, seed=seed, audio_pool=audio_pool, io_threads=io_threads, mining_size=mining_size)
     dataloader_val = build_dataloader(val_ids_path, embeddings_path, val_embs_path, normalize, image_only, batch_size_val, num_thread_reader, shuffle=False, drop_last=False, split="val", audio_pool=audio_pool, io_threads=io_threads)
     dataloader_test = build_dataloader(test_ids_path, embeddings_path, test_embs_path, normalize, image_only, batch_size_val, num_thread_reader, shuffle=False, drop_last=False, split="test", audio_pool=audio_pool, io_threads=io_threads)
+    # clip id -> visual item, so several audios of one image are ranked as in eval.py
+    val_keys, test_keys = visual_key_map(val_ids_path), visual_key_map(test_ids_path)
 
     net = build_model(image_dim, video_feat_dim, audio_dim, embd_dim, image_only, audio_pool, normalize)
 
@@ -257,9 +249,9 @@ def run_training(
 
     if eval_only:
         if dataloader_val is not None:
-            val_metrics = eval_retrieval(net, dataloader_val, "val", eval_lang_retrieval, within_speaker=eval_within_speaker, wandb_log=True, step=global_step)
+            val_metrics = eval_retrieval(net, dataloader_val, "val", eval_lang_retrieval, within_speaker=eval_within_speaker, wandb_log=True, step=global_step, visual_keys=val_keys)
         if dataloader_test is not None:
-            test_metrics = eval_retrieval(net, dataloader_test, "test", eval_lang_retrieval, within_speaker=eval_within_speaker, wandb_log=True, step=global_step)
+            test_metrics = eval_retrieval(net, dataloader_test, "test", eval_lang_retrieval, within_speaker=eval_within_speaker, wandb_log=True, step=global_step, visual_keys=test_keys)
             
         print("\n" + "=" * 60)
         print("FINAL RETRIEVAL RESULTS")
@@ -359,9 +351,9 @@ def run_training(
         val_metrics = None
         test_metrics = None
         if dataloader_val is not None:
-            val_metrics = eval_retrieval(net, dataloader_val, "val", eval_lang_retrieval, within_speaker=eval_within_speaker, wandb_log=True, step=global_step)
+            val_metrics = eval_retrieval(net, dataloader_val, "val", eval_lang_retrieval, within_speaker=eval_within_speaker, wandb_log=True, step=global_step, visual_keys=val_keys)
         if dataloader_test is not None:
-            test_metrics = eval_retrieval(net, dataloader_test, "test", eval_lang_retrieval, within_speaker=eval_within_speaker, wandb_log=True, step=global_step)
+            test_metrics = eval_retrieval(net, dataloader_test, "test", eval_lang_retrieval, within_speaker=eval_within_speaker, wandb_log=True, step=global_step, visual_keys=test_keys)
 
         if dataloader_val is not None:
             if checkpoint_metric not in val_metrics:
@@ -400,9 +392,9 @@ def run_training(
                 break
 
     if dataloader_val is not None:
-        eval_retrieval(net, dataloader_val, "val", eval_lang_retrieval, within_speaker=eval_within_speaker, wandb_log=True, step=global_step)
+        eval_retrieval(net, dataloader_val, "val", eval_lang_retrieval, within_speaker=eval_within_speaker, wandb_log=True, step=global_step, visual_keys=val_keys)
     if dataloader_test is not None:
-        eval_retrieval(net, dataloader_test, "test", eval_lang_retrieval, within_speaker=eval_within_speaker, wandb_log=True, step=global_step)
+        eval_retrieval(net, dataloader_test, "test", eval_lang_retrieval, within_speaker=eval_within_speaker, wandb_log=True, step=global_step, visual_keys=test_keys)
 
     print("\n" + "=" * 60)
     print("FINAL RETRIEVAL RESULTS")

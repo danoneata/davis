@@ -16,13 +16,21 @@ Flickr8k has ~5 spoken captions per image. Images are deduplicated:
 
 Usage:
     python eval_checkpoints.py [--config default] [--checkpoint_dir checkpoints]
-        [--out_dir eval_results] [--gpu 0] [--pattern '*'] [--rerun]
+        [--out_dir eval_results] [--gpu 0] [--pattern '*'] [--rerun] [--<config_key> value ...]
+
+Any extra --key value (or --key=value) overrides that field of configs/<config>.yaml, e.g.
+    python eval_checkpoints.py --audio_model wavlm --checkpoint_dir checkpoints-wavlm
+--audio_model (spear | wavlm, default spear) selects the embeddings-<audio_model> dirs and,
+unless --audio_dim is given, the matching audio_dim (spear 1280, wavlm 768).
 
 Outputs in --out_dir:
     results.jsonl          one line per run, all metrics (cache: finished runs are skipped)
-    results_R@10.csv       one row per run: model, batch_mode, modality, checkpoint,
-                           R@10 (%) video->audio and audio->video per eval set
-    results_long.csv       one row per (run, eval set, direction) with all metrics
+    results_R@10.csv       "R@10" title row, then one row per run: Data, Filtering, No. Samples,
+                           Batching Mode, Modality, Best Epoch, Val, then R@10 (%) per eval set
+                           and direction (1 decimal)
+    results_long.csv       one row per (run, eval set, direction): same leading columns,
+                           then all metrics (+ checkpoint path)
+Data/Filtering come from the model name; No. Samples = lines in manif_train-<data>/<model>.json.
 """
 import argparse
 import csv
@@ -37,18 +45,25 @@ from omegaconf import OmegaConf
 
 REPO = Path(__file__).resolve().parent
 
-HOW2_EMBS = "/mnt/private-share/speechDatabases/how2/processed_how2/embeddings-spear/"
-GABI = "/mnt/private-share/speechDatabases/davis-gabi"
-# name -> (manifest, embeddings dir, usable by av models?)
+# {audio_model} is filled in from the config / --audio_model (spear | wavlm)
+HOW2_EMBS = "/mnt/private-share/speechDatabases/how2/processed_how2/embeddings-{audio_model}/"
+EVAL_EMBS = "/mnt/private-share/speechDatabases/davis-gabi/embeddings-{audio_model}"
+MANIFESTS = "/mnt/private-share/speechDatabases/davis-gabi/manifests"
+AUDIO_DIMS = {"spear": 1280, "wavlm": 768}  # default audio_dim per audio_model
+# name -> (manifest, embeddings dir template, usable by av models?)
 EVAL_SETS = {
-    "dev5": (f"{GABI}/how2-spkr-sep/how2_dev5-final.json", HOW2_EMBS, True),
-    "dev5_unfiltered": (f"{GABI}/how2-spkr-sep/how2_dev5-final-no_filter2k.json", HOW2_EMBS, True),
-    "flickr8k": (str(REPO / "flickr8k.json"), f"{GABI}/embeddings-spear/flickr8k", False),
+    "dev5": (f"{MANIFESTS}/how2_dev5-final.json", HOW2_EMBS, True),
+    "dev5_unfiltered": (f"{MANIFESTS}/how2_dev5-final-no_filter2k.json", HOW2_EMBS, True),
+    "flickr8k": (f"{MANIFESTS}/flickr8k_test.json", f"{EVAL_EMBS}/flickr8k", False),
 }
 DIRECTIONS = {"v2a": "video->audio", "a2v": "audio->video"}
 METRICS = ["R@1", "R@5", "R@10", "MRR", "MR"]
 
 RUN_RE = re.compile(r"^(?P<model>.+)_(?P<mode>random|speaker|video)_(?P<mod>av|img)$")
+# <data>_train-final[-<filter>] or <data>_train-final_<N>samp_<k>seeds_seed<i> (random subset)
+MODEL_RE = re.compile(r"^(?P<data>[^_]+)_[^-_]+-[^-_]+(?:-(?P<filter>.+?))?"
+                      r"(?:_(?P<n>\d+)samp_\d+seeds_(?P<seed>seed\d+))?$")
+TRAIN_MANIFESTS = REPO / "manif_train-{data}" / "{model}.json"  # one sample id per line
 CKPT_RE = re.compile(r"^e(\d+)_.*=([-\d.]+)pct\.pth$")
 
 
@@ -61,7 +76,29 @@ def parse_args():
     p.add_argument("--gpu", default=None, help="CUDA_VISIBLE_DEVICES")
     p.add_argument("--workers", type=int, default=0, help="DataLoader workers for loading eval features")
     p.add_argument("--rerun", action="store_true", help="ignore results.jsonl and evaluate everything again")
-    return p.parse_args()
+    args, extra = p.parse_known_args()
+    return args, parse_overrides(extra)
+
+
+def parse_overrides(extra):
+    """['--a', '1', '--b=x', '--flag'] -> {'a': 1, 'b': 'x', 'flag': True}; values typed via YAML."""
+    import yaml
+    out, i = {}, 0
+    while i < len(extra):
+        tok = extra[i]
+        if not tok.startswith("--"):
+            raise SystemExit(f"unexpected argument: {tok}")
+        key = tok[2:]
+        if "=" in key:
+            key, val = key.split("=", 1)
+        elif i + 1 < len(extra) and not extra[i + 1].startswith("--"):
+            i += 1
+            val = extra[i]
+        else:
+            val = "true"
+        out[key.replace("-", "_")] = yaml.safe_load(val)
+        i += 1
+    return out
 
 
 def best_checkpoint(run_dir):
@@ -72,6 +109,35 @@ def best_checkpoint(run_dir):
         if m and (best is None or float(m.group(2)) > best[2]):
             best = (f, int(m.group(1)), float(m.group(2)))
     return best
+
+
+_n_samples_cache = {}
+MODALITY_NAMES = {"av": "video+image", "img": "image"}
+BATCH_ORDER = {"random": 0, "speaker": 1, "video": 2}
+
+
+def describe_model(model):
+    """model name -> (data, filtering, no_samples, sort key), as displayed in the tables."""
+    m = MODEL_RE.match(model)
+    if not m:
+        return model, "?", "", (model, 9, 0, "")
+    data = m.group("data")
+    if model not in _n_samples_cache:
+        manifest = Path(str(TRAIN_MANIFESTS).format(data=data, model=model))
+        if manifest.exists():
+            with open(manifest) as f:
+                _n_samples_cache[model] = sum(1 for l in f if l.strip())
+        else:
+            _n_samples_cache[model] = int(m.group("n")) if m.group("n") else ""
+    n = _n_samples_cache[model]
+    if m.group("n"):    # random subset: after the filtered sets, by size then seed
+        filtering, order = " ".join(model.split("_")[-3:]), 2   # e.g. "16750samp 3seeds seed0"
+    elif m.group("filter"):
+        filtering, order = m.group("filter").replace("_", " ").replace("-", " + "), 1
+    else:
+        filtering, order = "-", 0
+    data_name = f"{data[0].upper()}{data[1:]} Train"
+    return data_name, filtering, n, (data, order, n if order == 2 else 0, filtering)
 
 
 class Evaluator:
@@ -94,6 +160,7 @@ class Evaluator:
         if key not in self.cache:
             manifest, embs, _ = EVAL_SETS[name]
             c = self.cfg
+            embs = embs.format(audio_model=c["audio_model"])
             loader = self.build_dataloader(
                 manifest, None, embs, c["normalize"], image_only, 4096, self.workers,
                 shuffle=False, drop_last=False, split=name,
@@ -151,13 +218,17 @@ class Evaluator:
 
 
 def write_tables(out_dir, rows):
-    rows = sorted(rows, key=lambda r: (r["modality"], r["model"], r["batch_mode"]))
-    pct = lambda x: f"{100 * x:.2f}"
+    info = {r["run"]: describe_model(r["model"]) for r in rows}
+    rows = sorted(rows, key=lambda r: (r["modality"] == "img", BATCH_ORDER.get(r["batch_mode"], 9),
+                                       info[r["run"]][3]))
+    lead_cols = ["Data", "Filtering", "No. Samples", "Batching Mode", "Modality", "Best Epoch", "Val"]
+    lead = lambda r: [*info[r["run"]][:3], r["batch_mode"], MODALITY_NAMES.get(r["modality"], r["modality"]),
+                      r["best_epoch"], f"{r['best_val']:.1f}"]
 
-    wide_cols = ["model", "batch_mode", "modality", "best_epoch", "val_R@10", "checkpoint"] + [
-        f"{s} {DIRECTIONS[d]} R@10" for s in EVAL_SETS for d in DIRECTIONS]
+    wide_cols = lead_cols + [f"{s} {DIRECTIONS[d]}" for s in EVAL_SETS for d in DIRECTIONS]
     with open(out_dir / "results_R@10.csv", "w", newline="") as f:
         w = csv.writer(f)
+        w.writerow(["R@10"])
         w.writerow(wide_cols)
         for r in rows:
             cells = []
@@ -169,35 +240,42 @@ def write_tables(out_dir, rows):
                     elif "error" in e:
                         cells.append("error")
                     else:
-                        cells.append(pct(e[d]["R@10"]))
-            w.writerow([r["model"], r["batch_mode"], r["modality"], r["best_epoch"],
-                        f"{r['best_val']:.2f}", Path(r["checkpoint"]).name] + cells)
+                        cells.append(f"{100 * e[d]['R@10']:.1f}")
+            w.writerow(lead(r) + cells)
 
-    long_cols = ["model", "batch_mode", "modality", "best_epoch", "checkpoint", "eval_set",
-                 "direction"] + [f"{m} (%)" if m != "MR" else m for m in METRICS] + ["n_queries", "error"]
+    pct = lambda x: f"{100 * x:.2f}"
+    long_cols = lead_cols + ["Eval Set", "Direction"] + [
+        f"{m} (%)" if m != "MR" else m for m in METRICS] + ["n_queries", "error", "checkpoint"]
     with open(out_dir / "results_long.csv", "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(long_cols)
         for r in rows:
-            base = [r["model"], r["batch_mode"], r["modality"], r["best_epoch"], r["checkpoint"]]
+            base = lead(r)
             for s, e in r["eval"].items():
                 for d, label in DIRECTIONS.items():
                     if "error" in e:
-                        w.writerow(base + [s, label] + [""] * (len(METRICS) + 1) + [e["error"]])
+                        w.writerow(base + [s, label] + [""] * (len(METRICS) + 1) + [e["error"], r["checkpoint"]])
                         continue
                     m = e[d]
                     vals = [f"{m['MR']:.1f}" if k == "MR" else pct(m[k]) for k in METRICS]
-                    w.writerow(base + [s, label] + vals + [m["n_queries"], ""])
+                    w.writerow(base + [s, label] + vals + [m["n_queries"], "", r["checkpoint"]])
 
 
 def main():
-    args = parse_args()
+    args, overrides = parse_args()
     os.chdir(REPO)
     sys.path.insert(0, str(REPO))
     if args.gpu is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
 
-    cfg = OmegaConf.to_container(OmegaConf.load(REPO / "configs" / f"{args.config}.yaml"), resolve=True)
+    cfg = OmegaConf.load(REPO / "configs" / f"{args.config}.yaml")
+    cfg = OmegaConf.to_container(OmegaConf.merge(cfg, OmegaConf.create(overrides)), resolve=True)
+    cfg.setdefault("audio_model", "spear")
+    if "audio_dim" not in overrides and cfg["audio_model"] in AUDIO_DIMS:
+        cfg["audio_dim"] = AUDIO_DIMS[cfg["audio_model"]]
+    if overrides:
+        print(f"config overrides: {overrides}")
+    print(f"audio_model={cfg['audio_model']}, audio_dim={cfg['audio_dim']}")
     ckpt_root = Path(args.checkpoint_dir or cfg.get("checkpoint_dir", "checkpoints"))
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)

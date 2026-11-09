@@ -389,6 +389,26 @@ def estimate_storage(durations, args):
 # --------------------------------------------------------------------------- #
 # Main
 # --------------------------------------------------------------------------- #
+def audio_duration(path):
+    try:
+        return sf.info(path).duration
+    except Exception:
+        return 0.0  # unreadable: keep it, the loader will report the error
+
+
+def filter_by_duration(video_paths, audio_paths, durations, max_duration, num_workers):
+    """Drop clips whose audio is longer than max_duration seconds (done before sharding, so every shard agrees)."""
+    durations = durations.copy()
+    missing = np.flatnonzero(durations <= 0)
+    if len(missing):
+        log.info("reading audio headers for %d clips without a manifest duration", len(missing))
+        with ThreadPoolExecutor(max(1, num_workers)) as pool:
+            durations[missing] = list(pool.map(audio_duration, (audio_paths[i] for i in missing)))
+    keep = np.flatnonzero(durations <= max_duration)
+    log.info("--max_duration %.1fs: keeping %d / %d clips", max_duration, len(keep), len(durations))
+    return [video_paths[i] for i in keep], [audio_paths[i] for i in keep], durations[keep]
+
+
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--manifest", nargs="+", required=True, help="one or more JSONL manifests")
@@ -411,6 +431,9 @@ def parse_args():
     p.add_argument("--shard_id", type=int, default=0)
     p.add_argument("--device", default="cuda")
     p.add_argument("--estimate_storage", action="store_true", help="print the expected disk usage and exit")
+    p.add_argument("--max_duration", type=float, default=None,
+                   help="skip clips whose audio is longer than this many seconds (uses the manifest 'duration', "
+                        "or reads the audio header when it is missing)")
     args = p.parse_args()
 
     if not args.output_dir and not args.estimate_storage:
@@ -426,6 +449,9 @@ def main():
 
     video_paths, audio_paths, durations = read_manifests(args.manifest)
     log.info("read %d clips from %d manifest(s)", len(video_paths), len(args.manifest))
+    if args.max_duration is not None:
+        video_paths, audio_paths, durations = filter_by_duration(video_paths, audio_paths, durations,
+                                                                 args.max_duration, args.num_workers)
     n_images = sum(map(is_image, video_paths))
     if n_images and args.mode == "full":
         raise SystemExit(f"{n_images} manifest entries are images: use --mode image_only (V-JEPA needs video)")
