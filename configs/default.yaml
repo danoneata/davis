@@ -2,29 +2,46 @@
 #   python train.py <this_file's_name_without_.yaml>
 # e.g. `python train.py default` for this file.
 
-dataset_name: how2
-embeddings_path: /mnt/private-share/speechDatabases/how2/processed_how2/embeddings/ #/mnt/private-share/speechDatabases/how2/processed_how2/embeddings
-train_ids_path: /mnt/private-share/speechDatabases/davis-gabi/how2-spkr-sep/how2_train-final.json #/mnt/private-share/speechDatabases/how2/processed_how2/train.txt
+dataset_name: how2-wavlm
+embeddings_path: null #/mnt/private-share/speechDatabases/how2/processed_how2/embeddings
+train_embs_path: /mnt/private-share/speechDatabases/how2/processed_how2/embeddings/all/
+train_ids_path: /mnt/private-share/speechDatabases/davis-gabi/how2-spkr-sep/how2_train-final.json #/mnt/private-share/speechDatabases/Panda70M/manifests_scenes/panda_train.json #/mnt/private-share/speechDatabases/how2/processed_how2/train.txt
+val_embs_path: /mnt/private-share/speechDatabases/how2/processed_how2/embeddings/all/
 val_ids_path:  /mnt/private-share/speechDatabases/davis-gabi/how2-spkr-sep/how2_val-final.json #/mnt/private-share/speechDatabases/how2/processed_how2/val.txt
-test_ids_path:  /mnt/private-share/speechDatabases/davis-gabi/how2-spkr-sep/how2_dev5-final-no_filter2k.json
+test_embs_path: /mnt/private-share/speechDatabases/how2/processed_how2/embeddings/all/
+test_ids_path:  /mnt/private-share/speechDatabases/davis-gabi/how2-spkr-sep/how2_dev5-final.json
 
 # MODEL
-image_dim: 768        # DINOv2 image embedding dim
+image_dim: 768 # 1536       # DINOv2 image embedding dim
 video_feat_dim: 1024  # V-JEPA2 video embedding dim
-audio_dim: 768        # WavLM audio embedding dim
+audio_dim: 768  # SPEAR audio embedding (1280) dim (768 for WavLM)
+# true  -> mean-pool audio frames [T, D] -> [D] in the dataset (original behaviour)
+# false -> keep frames [T, D], pad per batch, pool in the model with learned
+#          attention (starts as exact masked mean pooling)
+audio_pool: true
 embd_dim: 1024         # shared audio-video embedding space dim
 normalize: true
 image_only: false
 
 # TRAINING PARAMS
-batch_size: 256
+batch_size: 512
 batch_size_val: 100000 # big value to cover whole validation
+# How training batches are formed (val/test always use plain batches):
+#   random  -> random samples from the whole dataset
+#   video   -> clips from the same original_video_id are batched together (hard negatives)
+#   speaker -> clips from the same speaker_id are batched together (hard negatives)
+batch_mode: random
+# video/speaker modes only: max clips of one video/speaker in a single batch
+# (e.g. 32). The group's remaining clips go into other batches, none are
+# dropped. -1 = no cap (a group can fill a whole batch).
+mining_size: 32
 loss: siglip
 lr: 1e-3
 lr_decay: 1.0
-epochs: 100
+epochs: 30
 seed: 1
-num_thread_reader: 8
+num_thread_reader: 24
+io_threads: 8
 pretrain_path: null
 checkpoint_dir: checkpoints
 
@@ -33,17 +50,22 @@ checkpoint_dir: checkpoints
 n_display: 150
 verbose: 1
 eval_lang_retrieval: 0
+# Also report retrieval where each query is ranked only against clips of its
+# own speaker (keys prefixed spk_, plus spk_chance_* = random-ranking baseline).
+# Speaker/recording cues can't help there, so it isolates content alignment.
+eval_within_speaker: False
 eval_only: False
 
 # CHECKPOINTS & EARLY STOPPING
-checkpoint_metric: R@5
+checkpoint_metric: R@10
 checkpoint_mode: max
 save_top_n_checkpoints: 3
-early_stopping: false
-early_stopping_patience: 10
+early_stopping: true
+early_stopping_patience: 15
 early_stopping_min_delta: 0.0
 
-wandb_project: avlnet-spkr-separated
+wandb_project: how2-filter-walm
 # ${} interpolation pulls values from elsewhere in this same file, same as OmegaConf
 # does in the reference script.
-experiment_name: train-16457_${batch_size}_${lr}_${epochs}_${embd_dim}_${loss}
+base_exp: how2-filter-wavlm
+experiment_name: ${base_exp}_${batch_mode}_${batch_size}_${lr}_${epochs}_${loss}_image-{image_only}

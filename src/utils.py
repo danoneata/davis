@@ -22,16 +22,21 @@ import json
 from pathlib import PurePosixPath
 
 
-def read_file(ids_path):
+def read_manifest(ids_path):
     """
-    Read clip ids from either:
+    Read clip records from either:
       - a plain text file with one id per line:   1s1TPdCUvhQ_0
       - a JSONL file with one record per line:    {"video_path": ".../-07Hlp9ZerU_0.mp4", ...}
 
-    For JSON records the id is the filename stem of video_path
-    (falling back to audio_path), e.g. "-07Hlp9ZerU_0".
+    Returns a list of dicts with keys "id", "original_video_id" and
+    "speaker_id". For JSON records the id is the filename stem of audio_path
+    (falling back to video_path), e.g. "-07Hlp9ZerU_0", so an image with
+    several audios (Flickr8k <id>_0..4.wav) gives one record per audio. When
+    "original_video_id" is missing it is derived from the id by stripping the
+    segment suffix (001evy9D-mw_10 -> 001evy9D-mw); an explicit null
+    "original_video_id" and a missing/null "speaker_id" are None.
     """
-    ids = []
+    records = {}
     with open(ids_path, "r", encoding="utf-8") as f:
         for line_no, line in enumerate(f, 1):
             line = line.strip()
@@ -46,7 +51,7 @@ def read_file(ids_path):
                         f"{ids_path}:{line_no}: invalid JSON line ({e})"
                     )
 
-                path = record.get("video_path") or record.get("audio_path")
+                path = record.get("audio_path") or record.get("video_path")
                 if not path:
                     raise ValueError(
                         f"{ids_path}:{line_no}: record has no "
@@ -55,18 +60,37 @@ def read_file(ids_path):
                 seg_id = PurePosixPath(path).stem   # strips dir + extension
             else:
                 seg_id = line
+                record = {}
 
-            ids.append(seg_id)
+            # Drop duplicates but keep the order, so a clip can't appear twice
+            # in the dataset (and the sampler can't put it in a batch twice).
+            if seg_id in records:
+                continue
+            records[seg_id] = {
+                "id": seg_id,
+                # Absent key -> derived from the id; explicit null -> None
+                # (all null ids are grouped together by the dataset).
+                "original_video_id": (
+                    record["original_video_id"] if "original_video_id" in record
+                    else seg_id.rsplit("_", 1)[0]
+                ),
+                "speaker_id": record.get("speaker_id"),
+            }
 
-    # Drop duplicates but keep the order, so a clip can't appear twice in the
-    # dataset (and the sampler can't put it in a batch twice).
-    return list(dict.fromkeys(ids))
+    return list(records.values())
+
+
+def read_file(ids_path):
+    """Read only the clip ids of a manifest (see read_manifest)."""
+    return [r["id"] for r in read_manifest(ids_path)]
 
 def build_model(image_dim, 
                 video_feat_dim, 
                 audio_dim, 
                 embd_dim,
-                image_only
+                image_only,
+                audio_pool=True,
+                normalize=True,
                 ):
     
     if image_only: # for datasets like Flickr8k
@@ -74,44 +98,14 @@ def build_model(image_dim,
     else:
         video_dim = image_dim + video_feat_dim
     
-    return Net(embd_dim=embd_dim, video_dim=video_dim, audio_dim=audio_dim)
+    return Net(embd_dim=embd_dim, video_dim=video_dim, audio_dim=audio_dim,
+               audio_pool=audio_pool, normalize=normalize)
 
 
-def build_dataloader(ids_path,
-                     embeddings_path,
-                     normalize,
-                     image_only,
-                     batch_size,
-                     num_workers,
-                     shuffle,
-                     drop_last,
-                     split):
-    if not ids_path:
-        return None
-    # Avoid circular import: import Feature_DataLoader locally
-    from src.dataset import Feature_DataLoader
-
-    dataset = Feature_DataLoader(
-        ids_path=ids_path,
-        embeddings_path=embeddings_path,
-        split=split,
-        normalize=normalize,
-        image_only=image_only,
-    )
-    print(f"{ids_path}: {len(dataset)} clips")
-    if len(dataset) == 0:
-        raise ValueError(f"No embeddings found for any id in {ids_path}.")
-    return DataLoader(
-        dataset,
-        batch_size=batch_size,
-        num_workers=num_workers,
-        shuffle=shuffle,
-        drop_last=drop_last,
-    )
-
-def build_dataloader_negmine(
+def build_dataloader(
     ids_path,
     embeddings_path,
+    embeddings_path_split,
     normalize,
     image_only,
     batch_size,
@@ -119,22 +113,47 @@ def build_dataloader_negmine(
     shuffle,
     drop_last,
     split,
+    batch_mode="random",
+    seed=0,
+    audio_pool=True,
+    io_threads=8,
+    prefetch_factor=4,
+    mining_size=-1,
 ):
+    """
+    batch_mode selects how batches are formed:
+      - "random":  plain DataLoader batches (shuffled if shuffle=True).
+      - "video":   clips from the same original_video_id are packed together.
+      - "speaker": clips from the same speaker_id are packed together.
+    mining_size caps how many clips of one group go into a single batch
+    (-1 = no cap); the rest of the group lands in other batches, nothing is dropped.
+    Evaluation loaders should use "random" with shuffle=False.
+    """
     if not ids_path:
         return None
 
     # Avoid circular import.
-    from src.dataset_negmine import (
-        Feature_DataLoader,
-        VideoGroupedBatchSampler,
-    )
+    from src.dataset import BATCH_MODES, Feature_DataLoader, GroupedBatchSampler
+
+    if batch_mode not in BATCH_MODES:
+        raise ValueError(f"batch_mode must be one of {BATCH_MODES}, got '{batch_mode}'.")
 
     dataset = Feature_DataLoader(
         ids_path=ids_path,
         embeddings_path=embeddings_path,
+        embeddings_path_split=embeddings_path_split,
         split=split,
         normalize=normalize,
         image_only=image_only,
+        audio_pool=audio_pool,
+        io_threads=io_threads,
+    )
+
+    # Keep workers alive across epochs (no re-spawn after every epoch / val)
+    # and let each one queue more batches ahead.
+    worker_kwargs = (
+        dict(persistent_workers=True, prefetch_factor=prefetch_factor)
+        if num_workers > 0 else {}
     )
 
     print(f"{ids_path}: {len(dataset)} clips")
@@ -144,61 +163,41 @@ def build_dataloader_negmine(
             f"No embeddings found for any id in {ids_path}."
         )
 
-    # ================================================================
-    # TRAINING
-    #
-    # We group complete videos into batches.
-    #
-    # Example with batch_size=32:
-    #
-    #   video A -> 10 clips
-    #   video B -> 8 clips
-    #   video C -> 7 clips
-    #   video D -> 12 clips
-    #
-    # batches:
-    #
-    #   A + B + C = 25
-    #   D         = 12
-    #
-    # D is NOT split between batches.
-    # ================================================================
-    if "train" in split:
-        batch_sampler = VideoGroupedBatchSampler(
-            dataset=dataset,
+    if batch_mode == "random":
+        return DataLoader(
+            dataset,
             batch_size=batch_size,
+            num_workers=num_workers,
             shuffle=shuffle,
             drop_last=drop_last,
-        )
-
-        loader = DataLoader(
-            dataset,
-            batch_sampler=batch_sampler,
-            num_workers=num_workers,
             pin_memory=True,
+            collate_fn=dataset.custom_collate,
+            **worker_kwargs,
         )
 
-        print(
-            f"[train] {len(batch_sampler)} grouped batches, "
-            f"target batch size={batch_size}"
-        )
-
-        return loader
-
-    # ================================================================
-    # VALIDATION / TEST
-    #
-    # Keep normal DataLoader behavior. Evaluation does not need the
-    # special grouped-negative sampling strategy.
-    # ================================================================
-    return DataLoader(
-        dataset,
+    batch_sampler = GroupedBatchSampler(
+        groups=dataset.group_indices(batch_mode),
         batch_size=batch_size,
-        num_workers=num_workers,
         shuffle=shuffle,
         drop_last=drop_last,
-        pin_memory=True,
+        seed=seed,
+        mining_size=mining_size,
     )
+
+    print(
+        f"[{split}] {len(batch_sampler)} {batch_mode}-grouped batches, "
+        f"target batch size={batch_size}, mining_size={mining_size}"
+    )
+
+    return DataLoader(
+        dataset,
+        batch_sampler=batch_sampler,
+        num_workers=num_workers,
+        pin_memory=True,
+        collate_fn=dataset.custom_collate,
+        **worker_kwargs,
+    )
+
 
 def is_better_metric(value, best, mode="max", min_delta=0.0):
     if best is None:

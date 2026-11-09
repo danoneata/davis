@@ -37,16 +37,23 @@ import torch.optim as optim
 import wandb
 from tqdm import tqdm as std_tqdm
 from pathlib import Path
+from omegaconf import OmegaConf
 
 tqdm = partial(std_tqdm, dynamic_ncols=True)
 
 th.backends.cudnn.benchmark = True
 
 from src.loss import MMS_loss, Siglip_loss
-from src.metrics import AverageMeter, compute_metrics, print_computed_metrics
+from src.metrics import (
+    AverageMeter,
+    chance_rank_metrics,
+    compute_metrics,
+    print_computed_metrics,
+    rank_metrics,
+    within_group_ranks,
+)
 from src.utils import (
     load_config,
-    build_dataloader_negmine,
     build_dataloader,
     build_model,
     checkpoint_filename,
@@ -59,10 +66,11 @@ CONFIGS_DIR = Path(__file__).parent / "configs"
 def train_one_batch(model, opt, data, loss_fun):
     video = data["video"].cuda()
     audio = data["audio"].cuda()
+    audio_mask = data["audio_mask"].cuda() if "audio_mask" in data else None
 
     opt.zero_grad()
     with th.set_grad_enabled(True):
-        audio_out, video_out = model(video, audio)
+        audio_out, video_out = model(video, audio, audio_mask)
         
         loss = loss_fun(audio_out, video_out)
         loss.backward()
@@ -74,6 +82,7 @@ def eval_retrieval(model,
                    eval_dataloader, 
                    dataset_name,
                    eval_lang_retrieval=False,
+                   within_speaker=False,
                    wandb_log=False, 
                    step=None):
 
@@ -82,12 +91,14 @@ def eval_retrieval(model,
     print(f"Evaluating retrieval on {dataset_name} data: retrieving {mode_str}")
 
     ranks = []
+    spk_ranks, spk_sizes = [], []
 
     for data in eval_dataloader:
         video = data["video"].cuda()
         audio = data["audio"].cuda()
+        audio_mask = data["audio_mask"].cuda() if "audio_mask" in data else None
 
-        audio_out, video_out = model(video, audio)
+        audio_out, video_out = model(video, audio, audio_mask)
 
         logits = th.matmul(audio_out, video_out.t())
         if eval_lang_retrieval:
@@ -98,18 +109,36 @@ def eval_retrieval(model,
         target_scores = logits.diagonal().unsqueeze(1)
         ranks.append((logits > target_scores).sum(dim=1) + 1)
 
+        # Same ranking, but each query only competes against clips of its own
+        # speaker, so speaker/recording cues can't help.
+        if within_speaker:
+            r, n = within_group_ranks(logits, list(data["speaker_id"]))
+            spk_ranks.append(r)
+            spk_sizes.append(n)
+
     ranks = th.cat(ranks).float()
 
-    metrics = {
-        "acc": (ranks <= 1).float().mean().item(),
-        "R@5": (ranks <= 5).float().mean().item(),
-        "R@10": (ranks <= 10).float().mean().item(),
-        "MRR": (1.0 / ranks).mean().item(),
-        "MR": ranks.median().item(),   # kept as "MR" for backward compat with V1's key
-    }
+    # "MR" kept for backward compat with V1's key
+    metrics = rank_metrics(ranks)
 
     print(f"{dataset_name} metrics: " +
           ", ".join(f"{k}={v:.4f}" for k, v in metrics.items()))
+
+    if within_speaker:
+        spk_ranks = th.cat(spk_ranks)
+        spk_sizes = th.cat(spk_sizes)
+        if len(spk_ranks):
+            spk_metrics = rank_metrics(spk_ranks, prefix="spk_")
+            chance = chance_rank_metrics(spk_sizes, prefix="spk_chance_")
+            print(f"{dataset_name} within-speaker metrics ({len(spk_ranks)} queries, "
+                  f"{spk_sizes.float().mean().item():.1f} candidates avg): " +
+                  ", ".join(f"{k}={v:.4f}" for k, v in spk_metrics.items()))
+            print(f"{dataset_name} within-speaker chance: " +
+                  ", ".join(f"{k}={v:.4f}" for k, v in chance.items()))
+            metrics.update(spk_metrics)
+            metrics.update(chance)
+        else:
+            print(f"{dataset_name}: no speaker ids with >1 clip, skipping within-speaker metrics")
 
     if wandb_log:
         wandb.log(
@@ -122,7 +151,11 @@ def eval_retrieval(model,
 
 def run_training(
     dataset_name: str = None,
+    base_exp: str = None,
     embeddings_path: str = None,
+    train_embs_path: str = None,
+    val_embs_path: str = None,
+    test_embs_path: str = None,
     train_ids_path: str = None,
     val_ids_path: str = None,
     test_ids_path: str = None,
@@ -132,8 +165,11 @@ def run_training(
     embd_dim: int = 4096,
     normalize: bool = True,
     image_only: bool = False,
+    audio_pool: bool = True,
     batch_size: int = 128,
     batch_size_val: int = 10000,
+    batch_mode: str = "random",
+    mining_size: int = -1,
     loss: str = "mms",
     lr: float = 1e-4,
     lr_decay: float = 1.0,
@@ -146,6 +182,7 @@ def run_training(
     n_display: int = 3,
     verbose: int = 1,
     eval_lang_retrieval: int = 0,
+    eval_within_speaker: bool = False,
     eval_only: bool = False,
     checkpoint_metric: str = "acc",
     checkpoint_mode: str = "max",
@@ -154,6 +191,7 @@ def run_training(
     early_stopping_patience: int = 10,
     early_stopping_min_delta: float = 0.0,
     wandb_project: str = "avlnet",
+    io_threads: int = 8,
 ):
     th.manual_seed(seed)
     np.random.seed(seed)
@@ -177,7 +215,10 @@ def run_training(
             "embd_dim": embd_dim,
             "normalize": normalize,
             "image_only": image_only,
+            "audio_pool": audio_pool,
             "batch_size": batch_size,
+            "batch_mode": batch_mode,
+            "mining_size": mining_size,
             "loss": loss,
             "lr": lr,
             "lr_decay": lr_decay,
@@ -192,11 +233,11 @@ def run_training(
         },
     )
 
-    dataloader = build_dataloader_negmine(train_ids_path, embeddings_path, normalize, image_only, batch_size, num_thread_reader, shuffle=True, drop_last=True, split="train_how2")
-    dataloader_val = build_dataloader_negmine(val_ids_path, embeddings_path, normalize, image_only, batch_size_val, num_thread_reader, shuffle=False, drop_last=False, split="val_how2")
-    dataloader_test = build_dataloader_negmine(test_ids_path, embeddings_path, normalize, image_only, batch_size_val, num_thread_reader, shuffle=False, drop_last=False, split="dev5_how2")
+    dataloader = build_dataloader(train_ids_path, embeddings_path, train_embs_path, normalize, image_only, batch_size, num_thread_reader, shuffle=True, drop_last=True, split="train", batch_mode=batch_mode, seed=seed, audio_pool=audio_pool, io_threads=io_threads, mining_size=mining_size)
+    dataloader_val = build_dataloader(val_ids_path, embeddings_path, val_embs_path, normalize, image_only, batch_size_val, num_thread_reader, shuffle=False, drop_last=False, split="val", audio_pool=audio_pool, io_threads=io_threads)
+    dataloader_test = build_dataloader(test_ids_path, embeddings_path, test_embs_path, normalize, image_only, batch_size_val, num_thread_reader, shuffle=False, drop_last=False, split="test", audio_pool=audio_pool, io_threads=io_threads)
 
-    net = build_model(image_dim, video_feat_dim, audio_dim, embd_dim, image_only)
+    net = build_model(image_dim, video_feat_dim, audio_dim, embd_dim, image_only, audio_pool, normalize)
 
     if pretrain_path:
         net.load_checkpoint(pretrain_path)
@@ -216,9 +257,9 @@ def run_training(
 
     if eval_only:
         if dataloader_val is not None:
-            val_metrics = eval_retrieval(net, dataloader_val, "val", eval_lang_retrieval, wandb_log=True, step=global_step)
+            val_metrics = eval_retrieval(net, dataloader_val, "val", eval_lang_retrieval, within_speaker=eval_within_speaker, wandb_log=True, step=global_step)
         if dataloader_test is not None:
-            test_metrics = eval_retrieval(net, dataloader_test, "test", eval_lang_retrieval, wandb_log=True, step=global_step)
+            test_metrics = eval_retrieval(net, dataloader_test, "test", eval_lang_retrieval, within_speaker=eval_within_speaker, wandb_log=True, step=global_step)
             
         print("\n" + "=" * 60)
         print("FINAL RETRIEVAL RESULTS")
@@ -273,7 +314,8 @@ def run_training(
         if verbose:
             print("Epoch: %d" % epoch)
 
-        dataloader.batch_sampler.set_epoch(epoch)
+        if hasattr(dataloader.batch_sampler, "set_epoch"):
+            dataloader.batch_sampler.set_epoch(epoch)
 
         end_time = time.time()
         for i_batch, sample_batch in enumerate(tqdm(dataloader)):
@@ -317,9 +359,9 @@ def run_training(
         val_metrics = None
         test_metrics = None
         if dataloader_val is not None:
-            val_metrics = eval_retrieval(net, dataloader_val, "val", eval_lang_retrieval, wandb_log=True, step=global_step)
+            val_metrics = eval_retrieval(net, dataloader_val, "val", eval_lang_retrieval, within_speaker=eval_within_speaker, wandb_log=True, step=global_step)
         if dataloader_test is not None:
-            test_metrics = eval_retrieval(net, dataloader_test, "test", eval_lang_retrieval, wandb_log=True, step=global_step)
+            test_metrics = eval_retrieval(net, dataloader_test, "test", eval_lang_retrieval, within_speaker=eval_within_speaker, wandb_log=True, step=global_step)
 
         if dataloader_val is not None:
             if checkpoint_metric not in val_metrics:
@@ -358,9 +400,9 @@ def run_training(
                 break
 
     if dataloader_val is not None:
-        eval_retrieval(net, dataloader_val, "val", eval_lang_retrieval, wandb_log=True, step=global_step)
+        eval_retrieval(net, dataloader_val, "val", eval_lang_retrieval, within_speaker=eval_within_speaker, wandb_log=True, step=global_step)
     if dataloader_test is not None:
-        eval_retrieval(net, dataloader_test, "test", eval_lang_retrieval, wandb_log=True, step=global_step)
+        eval_retrieval(net, dataloader_test, "test", eval_lang_retrieval, within_speaker=eval_within_speaker, wandb_log=True, step=global_step)
 
     print("\n" + "=" * 60)
     print("FINAL RETRIEVAL RESULTS")
@@ -397,7 +439,9 @@ def main(config_name: str = None, **overrides):
     Example:
         python train.py default
     """
-    cfg = dict(load_config(CONFIGS_DIR,config_name)) if config_name else {}
+    cfg = load_config(CONFIGS_DIR, config_name) if config_name else OmegaConf.create()
+    cfg = OmegaConf.merge(cfg, overrides)
+    cfg = OmegaConf.to_container(cfg, resolve=True)
     cfg.update(overrides)
     
     print(f"Running training" + (f" with config `{config_name}`" if config_name else "") + ":")

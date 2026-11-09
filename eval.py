@@ -22,6 +22,7 @@ Examples:
 from __future__ import absolute_import, division, unicode_literals, print_function
 
 import inspect
+import json
 
 import numpy as np
 import torch as th
@@ -33,10 +34,10 @@ from torch.utils.data import DataLoader
 from src.utils import (
     load_config,
     build_dataloader,
-    build_dataloader_negmine,
     build_model,
 
 )
+from src.metrics import rank_metrics, retrieval_ranks
 
 
 
@@ -44,48 +45,63 @@ th.backends.cudnn.benchmark = True
 
 CONFIGS_DIR = Path(__file__).parent / "configs"
 
+def visual_key_map(manifest_path):
+    """clip id -> visual item key, read from a JSONL manifest.
+
+    The clip id is the audio file stem (as in read_manifest); the visual key is
+    the video/image file stem. Several clips can share one visual item (Flickr8k:
+    <id>.jpg with audios <id>_0..4.wav). Plain-text manifests -> {} (1-to-1).
+    """
+    keys = {}
+    if not manifest_path:
+        return keys
+    with open(manifest_path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            r = json.loads(line)
+            visual = r.get("video_path") or r.get("image_path")
+            clip = r.get("audio_path") or visual
+            if clip and visual:
+                keys[Path(clip).stem] = Path(visual).stem
+    return keys
+
+
 @th.no_grad()
-def eval_retrieval(model, eval_dataloader, dataset_name,
-                    eval_lang_retrieval=False,
-                    wandb_log=False, step=None):
-    """Full-corpus retrieval eval: embeds the whole split, then ranks every
-    query against every candidate in the split (not just within-batch)."""
+def embed_split(model, eval_dataloader):
+    """Run the model over a whole split -> (audio (N, D), video (N, D), clip ids)."""
     model.eval()
-    mode_str = "audio given video" if eval_lang_retrieval else "video given audio"
-    print(f"Evaluating retrieval on {dataset_name} data: retrieving {mode_str}")
-
-    all_audio = []
-    all_video = []
-
+    all_audio, all_video, ids = [], [], []
     for data in eval_dataloader:
         video = data["video"].cuda()
         audio = data["audio"].cuda()
-
-        audio_out, video_out = model(video, audio)
-
+        audio_mask = data["audio_mask"].cuda() if "audio_mask" in data else None
+        audio_out, video_out = model(video, audio, audio_mask)
         all_audio.append(audio_out)
         all_video.append(video_out)
+        ids.extend(data["video_id"])
+    return th.cat(all_audio), th.cat(all_video), ids
 
 
-    all_audio = th.cat(all_audio, dim=0)  # (N, D)
-    all_video = th.cat(all_video, dim=0)  # (N, D)
+@th.no_grad()
+def eval_retrieval(model, eval_dataloader, dataset_name,
+                    eval_lang_retrieval=False,
+                    wandb_log=False, step=None, visual_keys=None):
+    """Full-corpus retrieval eval: embeds the whole split, then ranks every
+    query against every candidate in the split (not just within-batch).
 
-    # Query = video, candidate = audio  (or vice versa)
-    if eval_lang_retrieval:
-        logits = th.matmul(all_video, all_audio.t())
-    else:
-        logits = th.matmul(all_audio, all_video.t())
+    visual_keys (clip id -> visual item, see visual_key_map) handles several
+    audios per image: images are deduplicated, audio->video ranks the unique
+    images, video->audio counts a hit when any of the image's audios is ranked
+    high enough (first correct hit)."""
+    mode_str = "audio given video" if eval_lang_retrieval else "video given audio"
+    print(f"Evaluating retrieval on {dataset_name} data: retrieving {mode_str}")
 
-    target_scores = logits.diagonal().unsqueeze(1)
-    ranks = ((logits > target_scores).sum(dim=1) + 1).float()
-
-    metrics = {
-        "acc": (ranks <= 1).float().mean().item(),
-        "R@5": (ranks <= 5).float().mean().item(),
-        "R@10": (ranks <= 10).float().mean().item(),
-        "MRR": (1.0 / ranks).mean().item(),
-        "MR": ranks.median().item(),
-    }
+    all_audio, all_video, ids = embed_split(model, eval_dataloader)
+    keys = [visual_keys.get(i, i) for i in ids] if visual_keys else None
+    a2v, v2a = retrieval_ranks(all_audio, all_video, keys)
+    metrics = rank_metrics(v2a if eval_lang_retrieval else a2v)
 
     print(f"{dataset_name} metrics: " +
           ", ".join(f"{k}={v:.4f}" for k, v in metrics.items()))
@@ -104,12 +120,15 @@ def run_eval(
     embeddings_path: str = None,
     val_ids_path: str = None,
     test_ids_path: str = None,
+    val_embs_path: str = None,
+    test_embs_path: str = None,
     image_dim: int = 768,
     video_feat_dim: int = 1024,
     audio_dim: int = 768,
     embd_dim: int = 4096,
     normalize: bool = True,
     image_only: bool = False,
+    audio_pool: bool = True,
     batch_size_val: int = 10000,
     num_thread_reader: int = 8,
     pretrain_path: str = "",
@@ -131,33 +150,33 @@ def run_eval(
     if not pretrain_path:
         print("WARNING: no pretrain_path given, evaluating a randomly initialized model.")
 
-    net = build_model(image_dim, video_feat_dim, audio_dim, embd_dim, image_only)
+    net = build_model(image_dim, video_feat_dim, audio_dim, embd_dim, image_only, audio_pool, normalize)
     if pretrain_path:
         net.load_checkpoint(pretrain_path)
     net.cuda()
     net.eval()
 
     if dataset_name == "flickr8k":
-        dataloader_val = build_dataloader_negmine(None,embeddings_path, normalize, image_only, batch_size_val, num_thread_reader, shuffle=False, drop_last=False, split="val")
-        dataloader_test = build_dataloader_negmine(
-            test_ids_path, embeddings_path, normalize, image_only, batch_size_val, num_thread_reader, shuffle=False, drop_last=False, split="flickr8k"
+        dataloader_val = build_dataloader(None, embeddings_path, None, normalize, image_only, batch_size_val, num_thread_reader, shuffle=False, drop_last=False, split="val", audio_pool=audio_pool)
+        dataloader_test = build_dataloader(
+            test_ids_path, embeddings_path, test_embs_path, normalize, image_only, batch_size_val, num_thread_reader, shuffle=False, drop_last=False, split="flickr8k", audio_pool=audio_pool
         )
     elif dataset_name == "msr-vtt":
-        dataloader_val = build_dataloader_negmine(None,embeddings_path, normalize, image_only, batch_size_val, num_thread_reader,shuffle=False, drop_last=False, split="val")
-        dataloader_test = build_dataloader_negmine(
-            test_ids_path, embeddings_path, normalize, image_only, batch_size_val, num_thread_reader, shuffle=False, drop_last=False, split="msr-vtt"
+        dataloader_val = build_dataloader(None, embeddings_path, None, normalize, image_only, batch_size_val, num_thread_reader,shuffle=False, drop_last=False, split="val", audio_pool=audio_pool)
+        dataloader_test = build_dataloader(
+            test_ids_path, embeddings_path, test_embs_path, normalize, image_only, batch_size_val, num_thread_reader, shuffle=False, drop_last=False, split="msr-vtt", audio_pool=audio_pool
         )
     elif dataset_name == "youcook2":
-        dataloader_val = build_dataloader_negmine(None,embeddings_path, normalize, image_only, batch_size_val, num_thread_reader, shuffle=False, drop_last=False, split="val")
-        dataloader_test = build_dataloader_negmine(
-            test_ids_path, embeddings_path, normalize, image_only,  batch_size_val, num_thread_reader, shuffle=False, drop_last=False, split="youcook2"
+        dataloader_val = build_dataloader(None, embeddings_path, None, normalize, image_only, batch_size_val, num_thread_reader, shuffle=False, drop_last=False, split="val", audio_pool=audio_pool)
+        dataloader_test = build_dataloader(
+            test_ids_path, embeddings_path, test_embs_path, normalize, image_only,  batch_size_val, num_thread_reader, shuffle=False, drop_last=False, split="youcook2", audio_pool=audio_pool
         )
     else:
-        dataloader_val = build_dataloader_negmine(
-            val_ids_path, embeddings_path, normalize, image_only, batch_size_val, num_thread_reader, shuffle=False, drop_last=False, split="val_how2"
+        dataloader_val = build_dataloader(
+            val_ids_path, embeddings_path, val_embs_path, normalize, image_only, batch_size_val, num_thread_reader, shuffle=False, drop_last=False, split="val_how2", audio_pool=audio_pool
         )
-        dataloader_test = build_dataloader_negmine(
-            test_ids_path, embeddings_path, normalize, image_only, batch_size_val, num_thread_reader, shuffle=False, drop_last=False, split="dev5_how2"
+        dataloader_test = build_dataloader(
+            test_ids_path, embeddings_path, test_embs_path, normalize, image_only, batch_size_val, num_thread_reader, shuffle=False, drop_last=False, split="dev5_how2", audio_pool=audio_pool
         )
 
     if wandb_log:
@@ -177,9 +196,11 @@ def run_eval(
     test_metrics = None
 
     if dataloader_val is not None:
-        val_metrics = eval_retrieval(net, dataloader_val, dataset_name, eval_lang_retrieval, wandb_log=wandb_log)
+        val_metrics = eval_retrieval(net, dataloader_val, dataset_name, eval_lang_retrieval, wandb_log=wandb_log,
+                                     visual_keys=visual_key_map(val_ids_path))
     if dataloader_test is not None:
-        test_metrics = eval_retrieval(net, dataloader_test, dataset_name, eval_lang_retrieval, wandb_log=wandb_log)
+        test_metrics = eval_retrieval(net, dataloader_test, dataset_name, eval_lang_retrieval, wandb_log=wandb_log,
+                                      visual_keys=visual_key_map(test_ids_path))
 
     print("\n" + "=" * 60)
     print("FINAL RETRIEVAL RESULTS")
