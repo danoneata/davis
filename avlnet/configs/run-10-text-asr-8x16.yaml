@@ -1,0 +1,22 @@
+root: /data/how2/clean_code/how2/embeddings
+split_tag: final
+batch_size: 128
+n_epochs: 100
+projection_dim: 128
+use_video: false
+loss: siglip
+checkpoint_dir: checkpoints
+eval_every: 500
+max_steps: 144400
+# run-10: text-vision control for run-09-spk-all-8x16. Identical except that the
+# audio side is the CLIP ViT-L/14 text embedding of the transcript (`text`), so the
+# model can only use what is said -- no voice, speaker or recording cues.
+# Features from `uv run clip_baseline.py extract_text`, matched by segment id.
+# L2-normalised: raw CLIP text norms are ~17 vs ~2 for pooled WavLM.
+audio_features:
+  path: data/embeddings/how2-clip-vitl14/text-final.pkl
+  key: text_embeddings
+  l2_normalize: true
+group_negatives: {by: speaker_id, per_group: 16}
+patience: 10
+min_steps: 3000

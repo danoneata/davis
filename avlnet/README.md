@@ -513,6 +513,26 @@ enough for that to have mattered, and its numbers drop accordingly — the earli
 ones were flattered by the smaller effective gallery. `how2-val`, `how2-dev5`,
 `msr-vtt` and `youcook2` all fit in one chunk and are unchanged.
 
+### CLIP text baseline (`clip_baseline.py`)
+
+A reference point for the speech model on the How2 dev5 `final` folds: the audio
+side is replaced by text — the transcript (`text`) or the generated video
+description (`video_caption`) — and both sides are embedded by CLIP ViT-L/14
+(`openai/clip-vit-large-patch14`), the visual side from the segment's central frame.
+
+```bash
+uv run clip_baseline.py extract    # -> data/embeddings/how2-clip-vitl14/dev5-final-no_filter.pkl
+uv run clip_baseline.py evaluate   # CLIP and SPEECH_MODELS, R@1/5/10, MRR, MedR, % below per fold
+uv run clip_baseline.py extract_text   # CLIP text of train/val/dev5 for `audio_features` runs
+```
+
+`extract` covers all three dev5 filelists at once (`final` and
+`final-no_filter2k` are subsets of `final-no_filter`) and, unlike the grouped
+pickles, stores the segment IDs. Text longer than CLIP's 77 tokens is truncated and
+flagged (`text_truncated`). `evaluate` scores every system on the same pool — the
+fold's segments that have speech embeddings, via `how2_splits.load_split_ids` — through
+`retrieval.py`, so its speech-model numbers match `evaluate.py`.
+
 ## Qualitative retrieval viewer
 
 `show_results.py` is a Streamlit app that displays top-K retrievals for a query
