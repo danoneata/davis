@@ -123,17 +123,37 @@ def score_problem(
     return preds
 
 
-def metrics_from_ranks(ranks: np.ndarray) -> dict:
+def n_negatives(problem: dict) -> int:
+    """Gallery items that are wrong for every query: the gallery minus its positives.
+
+    Every query has the same number of positives (see `group_by_visual`), so this is
+    one number per problem.
+    """
+    return len(problem["zgallery"]) - problem["positives"].shape[1]
+
+
+def metrics_from_ranks(ranks: np.ndarray, n_negatives: int = None) -> dict:
     """R@1/5/10 (fractions in [0, 1]), MRR and median rank, from ground-truth ranks.
+
+    With `n_negatives` (see `n_negatives()`) it also returns `below`: the share of the
+    negatives that score below the best positive, averaged over queries, i.e.
+    1 - (rank - 1) / n_negatives. It is one minus a normalised mean rank, equivalently
+    the per-query ROC AUC of positive vs. negatives; 0.5 is chance. Unlike R@K and MRR
+    it weighs every position equally, so it measures the whole ranking, not its head.
+    Everything above the best positive is a negative, which is why `rank - 1` counts
+    negatives even when a query has several positives.
 
     Note `medr` averages the two middle values on an even count, where `train.evaluate`
     takes the lower one (`torch.median`); the two can differ by half a rank.
     """
     ranks = np.asarray(ranks, dtype=np.float64)
-    return {
+    metrics = {
         "r1": float((ranks <= 1).mean()),
         "r5": float((ranks <= 5).mean()),
         "r10": float((ranks <= 10).mean()),
         "mrr": float((1.0 / ranks).mean()),
         "medr": float(np.median(ranks)),
     }
+    if n_negatives is not None:
+        metrics["below"] = float((1.0 - (ranks - 1.0) / n_negatives).mean())
+    return metrics

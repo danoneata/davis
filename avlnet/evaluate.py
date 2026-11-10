@@ -15,6 +15,7 @@ from retrieval import (
     V2A,
     build_problem,
     metrics_from_ranks,
+    n_negatives,
     score_problem,
 )
 from train import DualEncoder, load_config
@@ -204,8 +205,9 @@ def _encode_pool(model, pool: dict, device) -> dict:
 def main(config_name: str, datasets=None, direction: str = V2A):
     """Evaluate the best checkpoint for `config_name` on one or more datasets.
 
-    By default, reports R@1/5/10, MRR and median rank on: how2-dev5 (How2 test, or
-    how2-dev5-<tag> for a config with a `split_tag`), msr-vtt, youcook2.
+    By default, reports R@10, MRR and % below (1 - normalised mean rank, see
+    `retrieval.metrics_from_ranks`) on: how2-dev5 (How2 test, or how2-dev5-<tag> for a
+    config with a `split_tag`), msr-vtt, youcook2.
 
     Example:
         uv run evaluate.py default
@@ -274,8 +276,9 @@ def main(config_name: str, datasets=None, direction: str = V2A):
             preds = score_problem(
                 problem, device=device, desc=f"Scoring {name} {direction}"
             )
-            for metric_name, value in metrics_from_ranks(preds["gt_rank"]).items():
-                if metric_name in {"r1", "r5", "r10"}:
+            metrics = metrics_from_ranks(preds["gt_rank"], n_negatives(problem))
+            for metric_name, value in metrics.items():
+                if metric_name in {"r1", "r5", "r10", "below"}:
                     value = 100 * value
                 yield {
                     "name": name,
@@ -290,7 +293,8 @@ def main(config_name: str, datasets=None, direction: str = V2A):
         for r in get_result(name)
     }
 
-    selected_metrics = ["r10", "mrr"]
+    # `below` comes last so the r10/mrr columns keep the positions old tables have.
+    selected_metrics = ["r10", "mrr", "below"]
     keys = [
         (metric, name, d)
         for metric in selected_metrics

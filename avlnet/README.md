@@ -465,7 +465,12 @@ Outputs:
 uv run evaluate.py <config_name> [--datasets a,b,c] [--direction v2a|a2v|both]
 ```
 
-Reports R@10 and MRR, ranked against the whole pool. Dataset names are either a
+Reports R@10, MRR and `below`, ranked against the whole pool. `below` (in %) is the
+share of wrong gallery items scoring below the correct one, averaged over queries:
+one minus a normalised mean rank, i.e. per-query ROC AUC, with 50 as chance. R@10 and
+MRR measure the head of the ranking, `below` the whole of it, so the two can disagree:
+a model can keep the correct item out of the bottom of the list without bringing it
+into the top 10. Dataset names are either a
 How2 split (`how2-train`/`how2-val`/`how2-dev5`, optionally with a filelist tag, as
 in `how2-dev5-final`) or a key of `extract_features.DATASETS`; the default set is
 `how2-dev5,msr-vtt,youcook2`, with `how2-dev5-<tag>` for a config with a `split_tag`.
