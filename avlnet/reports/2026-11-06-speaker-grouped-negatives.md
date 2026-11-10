@@ -7,6 +7,13 @@ with or slightly above `run-06-all`, and the smaller arms are level or worse. Fe
 gallery items share the query's speaker, so the gain there barely moves R@10. The
 peak comes a little later, but the smaller arms overfit more after it.
 
+A follow-up ablation over segments per speaker (run-09, the `all` arm only) shows
+the trade-off. The fewer speakers a batch holds, the better same-speaker
+discrimination gets, but from 2 × 64 on the model loses the ability to tell speakers
+apart, and full-pool retrieval falls. 8 speakers × 16 segments is the best on the
+held-out How2 folds (+2 R@10 points on `no_filter2k`), but it is worse on val and
+`msr-vtt`, and needs more seeds to confirm.
+
 ## Motivation
 
 The run-06 report (`2026-11-06-lm-score-positives.md`) found that generalising to
@@ -118,10 +125,92 @@ query on val, 55 of 2,001 on dev5); about 3 of them come from the same video.
   task, with 2–4× higher final train loss, lets the model fit more of the
   per-speaker detail of a small set.
 
+## Ablation: segments per speaker (run-09)
+
+This ablation changes the batch composition of `run-07-spk-all` (16 speakers × 8
+segments) by raising `per_group` to 16, 32, 64 or 128, with everything else fixed.
+The configs are `run-09-spk-all-{8x16,4x32,2x64,1x128}`.
+
+- **Early stopping:** `patience: 10` (evaluations, i.e. 5,000 steps) and
+  `min_steps: 3000`. The schedule is unchanged (144,400-step budget, 14,440 warmup
+  steps), so stopping only cuts a run short. The run-09 arms stopped between steps
+  13,500 and 20,500.
+- **The 16 × 8 reference:** `run-07-spk-all` is reused without rerunning it. Its val
+  curve, replayed with the same stopping rule, stops at step 15,500 and keeps the
+  same best checkpoint (step 10,500).
+- **Batch composition:** a speaker with fewer segments than `per_group` gives all of
+  them, and the batch is filled from more speakers. Larger speakers are drawn more
+  often, so the batches stay close to the nominal setting. 60% of training
+  segments belong to speakers with at least 128 segments. Measured over 2,000
+  batches:
+
+| | 16 × 8 | 8 × 16 | 4 × 32 | 2 × 64 | 1 × 128 |
+| --- | --- | --- | --- | --- | --- |
+| Speakers per batch | 16.0 | 8.1 | 4.2 | 2.4 | 1.4 |
+| Same-speaker negatives per item | 7.0 | 14.9 | 30.3 | 58.9 | 107.6 |
+
+R@10 (%) against the full pool, as above. "Random" is `run-06-all`.
+
+**Video → audio**
+
+| | random | 16 × 8 | 8 × 16 | 4 × 32 | 2 × 64 | 1 × 128 |
+| --- | --- | --- | --- | --- | --- | --- |
+| `how2-val-final` | 15.2 | **16.9** | 15.7 | 15.6 | 14.1 | 11.0 |
+| `how2-dev5-final` | 14.9 | 14.9 | **16.1** | 14.8 | 14.4 | 11.7 |
+| `how2-dev5-final-no_filter2k` | 17.0 | 17.1 | **19.1** | 17.0 | 15.5 | 13.6 |
+| `msr-vtt` | 7.2 | 7.3 | 5.9 | **7.8** | 6.3 | 3.9 |
+| `youcook2` | 1.4 | **1.6** | 1.0 | 1.1 | 1.2 | 1.5 |
+
+**Audio → video**
+
+| | random | 16 × 8 | 8 × 16 | 4 × 32 | 2 × 64 | 1 × 128 |
+| --- | --- | --- | --- | --- | --- | --- |
+| `how2-val-final` | 14.7 | **15.8** | 13.8 | 13.4 | 12.1 | 10.7 |
+| `how2-dev5-final` | 14.2 | **15.7** | **15.7** | 14.6 | 12.7 | 11.3 |
+| `how2-dev5-final-no_filter2k` | 17.0 | 16.5 | **18.3** | 16.8 | 14.7 | 12.4 |
+| `msr-vtt` | 4.5 | **5.9** | 5.4 | 5.4 | 4.8 | 3.7 |
+| `youcook2` | 1.6 | 2.1 | **2.3** | 2.1 | 1.9 | 1.8 |
+
+**Speaker discrimination and training.** The first two rows use the same diagnostic
+as above, as val / dev5 percentages. The run-09 arms stopped early, so their end
+values are not comparable and are left out.
+
+| | random | 16 × 8 | 8 × 16 | 4 × 32 | 2 × 64 | 1 × 128 |
+| --- | --- | --- | --- | --- | --- | --- |
+| Pos > same-spk | 65.7 / 63.5 | 68.3 / 66.4 | 70.1 / 68.2 | 71.0 / 68.2 | 71.1 / 68.1 | 72.3 / 70.4 |
+| Pos > other-spk | 89.8 / 89.5 | 90.5 / 89.8 | 90.0 / 91.4 | 90.7 / 90.5 | 89.7 / 89.6 | 86.9 / 87.2 |
+| Sim gap (val) | 0.217 | 0.208 | 0.197 | 0.202 | 0.164 | 0.099 |
+| Best step | 9,000 | 10,500 | 13,500 | 9,500 | 8,500 | 15,500 |
+| Val R@10 peak | 15.2 | 16.9 | 15.7 | 15.6 | 14.1 | 12.3 |
+
+**Findings**
+
+- **Fewer speakers per batch means better same-speaker discrimination.** It rises
+  steadily, from 68.3% to 72.3% on val (66.4% to 70.4% on dev5), and the clustering
+  by speaker falls by more than half at 1 × 128.
+- **Too few speakers costs cross-speaker discrimination.** At 1 × 128 a batch has
+  about 1.4 speakers, so there is little left to learn to tell speakers apart from:
+  other-speaker discrimination falls from about 90% to 87%. Full-pool R@10 drops by
+  3–5 points from 2 × 64 on, because cross-speaker distractors are 95% of the
+  gallery.
+- **8 × 16 is the best arm on the held-out How2 folds,** but the evidence is mixed:
+  - On `no_filter2k` it reaches 19.1 / 18.3, about +2 points over both 16 × 8 and
+    random batches (about 2–2.5 standard errors). On dev5 it is +1.2 video → audio
+    and level audio → video.
+  - It is worse than 16 × 8 on val (15.7 / 13.8 vs 16.9 / 15.8) and on `msr-vtt`
+    video → audio (5.9 vs 7.3).
+  - Each arm is a single seed, and val, which chooses the checkpoint, disagrees with
+    the test folds. Treat the gain as a lead to confirm with more seeds, not as a
+    result.
+- **The best range is 8–16 speakers per batch.** 4 × 32 already matches 16 × 8 at
+  best, and below that every fold gets worse.
+
 ## Next steps
 
-- **Stronger grouping:** keep only same-speaker pairs as negatives (mask the
-  cross-speaker pairs), or use more segments per speaker (e.g. 4 × 32).
+- **Seeds for 16 × 8 and 8 × 16** (`seed:` in the config), to check whether the
+  `no_filter2k` and dev5 gain of 8 × 16 is real.
+- **Stronger grouping without losing speakers:** keep the 16 × 8 batch, but weight
+  the same-speaker negatives more, rather than taking away cross-speaker ones.
 - **Grouping by video** (`by: original_video_id`), to separate the effect of
   matching the speaker from matching the whole video.
 - **Combine with the regularisation sweep:** the overfitting after the peak is still
