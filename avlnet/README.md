@@ -524,6 +524,7 @@ description (`video_caption`) — and both sides are embedded by CLIP ViT-L/14
 uv run clip_baseline.py extract    # -> data/embeddings/how2-clip-vitl14/dev5-final-no_filter.pkl
 uv run clip_baseline.py evaluate   # CLIP and SPEECH_MODELS, R@1/5/10, MRR, MedR, % below per fold
 uv run clip_baseline.py extract_text   # CLIP text of train/val/dev5 for `audio_features` runs
+uv run scripts/get_results.py impact_of_negative_pool   # report tables by experiment name (no name: list them)
 ```
 
 `extract` covers all three dev5 filelists at once (`final` and
