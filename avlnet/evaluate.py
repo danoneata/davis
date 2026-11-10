@@ -9,7 +9,7 @@ from tqdm import tqdm
 import pandas as pd
 
 from extract_features import DATASETS
-from how2_splits import load_split, parse_dataset_name
+from how2_splits import load_split_with_features, parse_dataset_name
 from retrieval import (
     DIRECTIONS,
     V2A,
@@ -144,8 +144,13 @@ def _load_dataset(name: str, cfg: dict) -> dict:
     """
     how2 = parse_dataset_name(name)
     if how2 is not None:
-        d = load_split(cfg["root"], *how2)
+        d = load_split_with_features(cfg["root"], *how2, cfg.get("audio_features"))
         arrays = d["video_embeddings"], d["image_embeddings"], d["audio_embeddings"]
+    elif cfg.get("audio_features") is not None:
+        raise ValueError(
+            f"This config replaces the audio side with `audio_features`, which only "
+            f"cover How2; it cannot be evaluated on `{name}`."
+        )
     elif name in DATASETS:
         if DATASETS[name].get("kind", "video") == "image":
             return _load_image_dataset(name)

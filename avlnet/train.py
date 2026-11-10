@@ -11,7 +11,7 @@ import yaml
 from pathlib import Path
 
 from filtering import evaluate_predicate, select_indices
-from how2_splits import filelist_path, load_split, load_split_ids, read_records
+from how2_splits import filelist_path, load_split_ids, load_split_with_features, read_records
 
 
 CONFIGS_DIR = Path(__file__).parent / "configs"
@@ -388,6 +388,7 @@ def run_training(
     warmup_steps: int = None,
     min_steps: int = 0,
     seed: int = None,
+    audio_features: dict = None,
 ):
     """Train the adapters on precomputed How2 embeddings.
 
@@ -441,6 +442,12 @@ def run_training(
     `per_group` segments from each, so some negatives always share the group (see
     `GroupedBatchSampler`). With `positive_filter` too, only positives fill the groups
     and the extra negatives are drawn from the same groups where possible.
+
+    `audio_features` (`{path, key, l2_normalize}`) replaces the audio side of every
+    split with external per-segment features, matched by segment id (see
+    `how2_splits.with_audio_features`) -- e.g. CLIP text embeddings of the
+    transcripts, to train a text-vision model with everything else unchanged. The
+    features must be `AUDIO_DIM`-dimensional.
     """
     if loss not in LOSSES:
         raise ValueError(f"Unknown loss `{loss}`. Available: {sorted(LOSSES)}")
@@ -488,7 +495,9 @@ def run_training(
         print(f"Group negatives: {len(set(groups))} groups by `{group_negatives['by']}`.")
 
     dataset = Dataset(
-        load_split(root, "train", split_tag), indices=train_indices, positive=positive
+        load_split_with_features(root, "train", split_tag, audio_features),
+        indices=train_indices,
+        positive=positive,
     )
 
     wandb.init(
@@ -517,6 +526,7 @@ def run_training(
             "n_positive": int(dataset.positive.sum()),
             "group_negatives": group_negatives,
             "n_groups": None if groups is None else len(set(groups)),
+            "audio_features": audio_features,
         }
     )
 
@@ -551,14 +561,14 @@ def run_training(
             ),
             num_workers=0,
         )
-    val_dataset = Dataset(load_split(root, "val", split_tag))
+    val_dataset = Dataset(load_split_with_features(root, "val", split_tag, audio_features))
     val_dataloader = torch.utils.data.DataLoader(
         val_dataset,
         batch_size=5000,
         shuffle=False,
         num_workers=0,
     )
-    test_dataset = Dataset(load_split(root, "dev5", split_tag))
+    test_dataset = Dataset(load_split_with_features(root, "dev5", split_tag, audio_features))
     test_dataloader = torch.utils.data.DataLoader(
         test_dataset,
         batch_size=5000,

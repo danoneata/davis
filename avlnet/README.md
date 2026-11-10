@@ -381,6 +381,27 @@ where possible. Batches are drawn independently, so an epoch is nominal and
 `max_steps` sets the length. The `run-07-spk-*` configs are the four `run-06` arms
 with this added.
 
+### Replacing the audio side (`audio_features`)
+
+`audio_features` swaps the WavLM audio embedding of every split (train, val, dev5)
+for external per-segment features. Everything else stays the same, so a text-vision
+model can be trained as a direct control for a speech-vision one:
+
+```yaml
+audio_features:
+  path: data/embeddings/how2-clip-vitl14/text-final.pkl   # from `clip_baseline.py extract_text`
+  key: text_embeddings                                    # or video_caption_embeddings
+  l2_normalize: true
+```
+
+The pickle holds `ids` plus one or more `(n, 768)` arrays, and rows are matched **by
+segment ID** (`how2_splits.with_audio_features`), never by position. A segment with
+no feature raises an error instead of being dropped. `evaluate.py` applies the same
+swap to How2 datasets and refuses non-How2 ones, which have no such features.
+`show_results.py` loads checkpoints directly and does not apply it, so do not use
+the viewer for these runs. `run-10-text-asr-8x16` is `run-09-spk-all-8x16` with the
+CLIP text of the transcript as the audio side.
+
 ### Training budget (`max_steps`)
 
 Filtering shrinks the training set, so at fixed `n_epochs` it also shortens the

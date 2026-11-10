@@ -129,3 +129,46 @@ def load_split_ids(root: str, split: str, tag: str | None = None) -> list[str]:
     if tag is None:
         return load_grouped_ids(root, split)
     return load_tagged_split(root, split, tag)[1]
+
+
+@lru_cache(maxsize=None)
+def _read_audio_features(path: str, key: str) -> tuple[np.ndarray, dict[str, int]]:
+    with open(path, "rb") as f:
+        features = pickle.load(f)
+    if key not in features:
+        raise KeyError(f"`{key}` not in {path}. Available: {sorted(features)}")
+    return features[key], {segment_id: i for i, segment_id in enumerate(features["ids"])}
+
+
+def with_audio_features(embeddings: dict, ids: list[str], spec: dict) -> dict:
+    """`embeddings` with `audio_embeddings` replaced by external per-segment features.
+
+    `spec` is the `audio_features` config key: `{path, key, l2_normalize}`. `path` is a
+    pickle holding `ids` and one or more `(n, dim)` arrays (e.g. the CLIP text
+    features written by `clip_baseline.py extract_text`); `key` picks the array. Rows
+    are matched to `ids` -- the segment id of each row of `embeddings` -- by id, never
+    by position, so the external file's order does not matter. A segment with no
+    feature is an error rather than a silent drop.
+    """
+    features, row_of = _read_audio_features(str(spec["path"]), spec["key"])
+    missing = [s for s in ids if s not in row_of]
+    if missing:
+        raise KeyError(
+            f"{len(missing)} of {len(ids)} segments have no `{spec['key']}` in "
+            f"{spec['path']} (e.g. {missing[:3]})."
+        )
+    audio = features[[row_of[s] for s in ids]].astype(np.float32)
+    if spec.get("l2_normalize", False):
+        audio = audio / np.linalg.norm(audio, axis=1, keepdims=True)
+    return {**embeddings, "audio_embeddings": audio}
+
+
+def load_split_with_features(root: str, split: str, tag: str | None, audio_features: dict | None) -> dict:
+    """`load_split`, with the audio side swapped for `audio_features` when it is set."""
+    if audio_features is None:
+        return load_split(root, split, tag)
+    if tag is None:
+        embeddings, ids = load_grouped(root, split), load_grouped_ids(root, split)
+    else:
+        embeddings, ids = load_tagged_split(root, split, tag)  # one pass for both
+    return with_audio_features(embeddings, ids, audio_features)
