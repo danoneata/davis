@@ -1,0 +1,16 @@
+[project]
+name = "whisper"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "av>=19.0.2",
+    "einops>=0.8.2",
+    "fire>=0.7.1",
+    "librosa>=1.0.0",
+    "torch>=2.15.0",
+    "torchvision>=0.29.2",
+    "transformers>=5.22.2",
+    "wandb>=0.31.0",
+]
