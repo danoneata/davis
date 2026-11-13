@@ -142,14 +142,14 @@ def main(
     )
 
     dataset = Dataset(
-        audio_embeddings_dir='/root/davis/whisper/embeddings/audio/dev5',
-        visual_embeddings_dir='/root/davis/whisper/embeddings/visual/dev5',
+        audio_embeddings_dir='/root/davis/whisper/embeddings/audio/train',
+        visual_embeddings_dir='/root/davis/whisper/embeddings/visual/train',
     )
     dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=0,
+        num_workers=16,
         collate_fn=collate,
     )
     val_dataset = Dataset(
@@ -160,7 +160,7 @@ def main(
         val_dataset,
         batch_size=256,
         shuffle=False,
-        num_workers=0,
+        num_workers=16,
         collate_fn=collate,
     )
     test_dataset = Dataset(
@@ -171,7 +171,7 @@ def main(
         test_dataset,
         batch_size=256,
         shuffle=False,
-        num_workers=0,
+        num_workers=16,
         collate_fn=collate,
     )
 
